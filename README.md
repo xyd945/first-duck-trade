@@ -1,4 +1,4 @@
-# First Duck Trade
+# First Duck Trade 🥇🦆
 
 A Freqtrade-based algo trading bot built on [freqtrade](https://github.com/freqtrade/freqtrade).
 
