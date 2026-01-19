@@ -1,11 +1,11 @@
 """
-MyFirstStrategy - A simple RSI-based buy/sell strategy.
+MyFirstStrategy - A simple RSI-based buy/sell strategy with Hyperopt support.
 
-Entry: RSI < 30 (oversold)
-Exit: RSI > 70 (overbought)
+Entry: RSI < rsi_entry threshold (oversold)
+Exit: RSI > rsi_exit threshold (overbought)
 """
 
-from freqtrade.strategy import IStrategy
+from freqtrade.strategy import IStrategy, IntParameter
 from pandas import DataFrame
 import pandas_ta as ta
 
@@ -13,7 +13,12 @@ import pandas_ta as ta
 class MyFirstStrategy(IStrategy):
     """
     A simple mean-reversion strategy based on RSI.
-    Buys when RSI dips below 30 (oversold) and sells when RSI rises above 70 (overbought).
+    Buys when RSI dips below threshold (oversold) and sells when RSI rises above threshold (overbought).
+    
+    Hyperopt-optimizable parameters:
+    - rsi_length: RSI calculation period
+    - rsi_entry: RSI threshold for entry (buy when RSI < this)
+    - rsi_exit: RSI threshold for exit (sell when RSI > this)
     """
 
     INTERFACE_VERSION = 3
@@ -31,12 +36,27 @@ class MyFirstStrategy(IStrategy):
     # Timeframe
     timeframe = '1h'
 
+    # Startup candle count - ensures indicators have enough data before trading
+    startup_candle_count = 30
+
+    # ========== HYPEROPT PARAMETERS ==========
+    # RSI period: search between 7 and 21 (default 14)
+    rsi_length = IntParameter(7, 21, default=14, space="buy", optimize=True)
+
+    # RSI entry threshold: search between 20 and 40 (default 30)
+    # Buy when RSI drops below this value
+    rsi_entry = IntParameter(20, 40, default=30, space="buy", optimize=True)
+
+    # RSI exit threshold: search between 60 and 80 (default 70)
+    # Sell when RSI rises above this value
+    rsi_exit = IntParameter(60, 80, default=70, space="sell", optimize=True)
+
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Calculate technical indicators and append them to the DataFrame.
         """
-        # Calculate RSI with a 14-period lookback
-        dataframe['rsi'] = ta.rsi(dataframe['close'], length=14)
+        # Calculate RSI with hyperopt-optimizable period
+        dataframe['rsi'] = ta.rsi(dataframe['close'], length=self.rsi_length.value)
 
         return dataframe
 
@@ -47,8 +67,8 @@ class MyFirstStrategy(IStrategy):
         """
         dataframe.loc[
             (
-                # Signal: RSI is below 30 (oversold)
-                (dataframe['rsi'] < 30) &
+                # Signal: RSI is below entry threshold (oversold)
+                (dataframe['rsi'] < self.rsi_entry.value) &
                 # Safety: Volume must exist
                 (dataframe['volume'] > 0)
             ),
@@ -63,8 +83,8 @@ class MyFirstStrategy(IStrategy):
         """
         dataframe.loc[
             (
-                # Signal: RSI is above 70 (overbought)
-                (dataframe['rsi'] > 70) &
+                # Signal: RSI is above exit threshold (overbought)
+                (dataframe['rsi'] > self.rsi_exit.value) &
                 # Safety: Volume must exist
                 (dataframe['volume'] > 0)
             ),

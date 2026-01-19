@@ -1,0 +1,31 @@
+{
+  "strategy_name": "MyFirstStrategy",
+  "params": {
+    "roi": {
+      "0": 0.2,
+      "30": 0.05,
+      "60": 0.01
+    },
+    "stoploss": {
+      "stoploss": -0.1
+    },
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": null,
+      "trailing_stop_positive_offset": 0.0,
+      "trailing_only_offset_is_reached": false
+    },
+    "max_open_trades": {
+      "max_open_trades": 3
+    },
+    "buy": {
+      "rsi_entry": 26,
+      "rsi_length": 19
+    },
+    "sell": {
+      "rsi_exit": 63
+    }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2026-01-19 13:05:30.546877+00:00"
+}
