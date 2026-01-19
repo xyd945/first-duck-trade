@@ -1,0 +1,37 @@
+# User specific configurations (API keys, etc.)
+user_data/config.json
+
+# Freqtrade download data
+user_data/data/
+
+# Backtest results
+user_data/backtest_results/
+
+# Hyperopt results
+user_data/hyperopt_results/
+
+# Plot dataframe results
+user_data/plot/
+
+# Exchange logs
+user_data/logs/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+user_data/notebooks/.ipynb_checkpoints
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# IDE specific
+.vscode/
+.idea/
+
+# Docker
+docker-compose.override.yml
