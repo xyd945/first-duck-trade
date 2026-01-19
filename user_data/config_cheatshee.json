@@ -1,0 +1,27 @@
+{
+    "_comment": "AI AGENT REFERENCE - ONLY MODIFY THESE FIELDS",
+    "trading_mode": {
+        "dry_run": true,
+        "stake_currency": "USDT",
+        "stake_amount": "unlimited",
+        "max_open_trades": 3
+    },
+    "exchange": {
+        "name": "binance",
+        "key": "YOUR_API_KEY",
+        "secret": "YOUR_SECRET_KEY",
+        "pair_whitelist": [
+            "BTC/USDT",
+            "ETH/USDT",
+            "SOL/USDT",
+            "XRP/USDT"
+        ]
+    },
+    "risk_management": {
+        "stoploss": -0.10,
+        "trailing_stop": false,
+        "trailing_stop_positive": 0.05,
+        "trailing_stop_positive_offset": 0.10
+    },
+    "timeframe": "5m"
+}
