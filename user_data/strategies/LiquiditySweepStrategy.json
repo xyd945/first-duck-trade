@@ -1,0 +1,43 @@
+{
+  "strategy_name": "LiquiditySweepStrategy",
+  "params": {
+    "roi": {
+      "0": 0.15,
+      "60": 0.08,
+      "120": 0.04,
+      "240": 0.02
+    },
+    "stoploss": {
+      "stoploss": -0.08
+    },
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": null,
+      "trailing_stop_positive_offset": 0.0,
+      "trailing_only_offset_is_reached": false
+    },
+    "max_open_trades": {
+      "max_open_trades": 3
+    },
+    "buy": {
+      "adx_threshold": 23,
+      "min_pivot_age": 29,
+      "min_sweep_dist": 0.009,
+      "pivot_len": 10,
+      "reclaim_strength_threshold": 0.9,
+      "require_strong_reclaim": true,
+      "sweep_lookback": 43,
+      "trend_ema_long": 117,
+      "trend_ema_short": 98,
+      "use_adx_filter": true,
+      "use_vol_check": true,
+      "vol_len": 21,
+      "vol_mult": 2.0
+    },
+    "sell": {
+      "rsi_exit_threshold": 80
+    }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2026-01-19 22:18:11.380227+00:00"
+}
