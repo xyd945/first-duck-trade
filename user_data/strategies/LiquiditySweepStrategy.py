@@ -164,9 +164,12 @@ class LiquiditySweepStrategy(IStrategy):
             limit=self.sweep_lookback.value
         )
 
-        # CRITICAL: Shift by 1 to compare against ESTABLISHED pivots (avoid lookahead)
-        dataframe['last_pivot_low'] = dataframe['last_pivot_low'].shift(1)
-        dataframe['pivot_age'] = dataframe['pivot_age'].shift(1)
+        # CRITICAL: A centered rolling window confirms a pivot only after pivot_len
+        # future candles have been seen. Shift by (pivot_len + 1) to ensure we only
+        # compare against pivots that are fully confirmed and avoid look-ahead bias.
+        pivot_shift = self.pivot_len.value + 1
+        dataframe['last_pivot_low'] = dataframe['last_pivot_low'].shift(pivot_shift)
+        dataframe['pivot_age'] = dataframe['pivot_age'].shift(pivot_shift)
 
         # ---------------------------------------------------------------------
         # Pivot High Detection (Vectorized) - for opposing sweep exits
@@ -189,8 +192,8 @@ class LiquiditySweepStrategy(IStrategy):
             limit=self.sweep_lookback.value
         )
 
-        # Shift by 1 to avoid lookahead
-        dataframe['last_pivot_high'] = dataframe['last_pivot_high'].shift(1)
+        # Shift by (pivot_len + 1) to match pivot low shift and avoid look-ahead
+        dataframe['last_pivot_high'] = dataframe['last_pivot_high'].shift(pivot_shift)
 
         # ---------------------------------------------------------------------
         # Volume Indicators

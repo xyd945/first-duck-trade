@@ -74,31 +74,26 @@ def format_for_freqtrade(df: pd.DataFrame) -> list:
     Freqtrade expects a list of lists: [[timestamp, open, high, low, close, volume], ...]
     Timestamp should be in milliseconds.
     """
-    output_data = []
-    
-    # Iterate over rows
-    for index, row in df.iterrows():
-        # Handle Date index
-        # Yahoo index is datetime64[ns, America/New_York] usually
-        # Convert to UTC timestamp in ms
-        dt_utc = index.tz_convert(timezone.utc)
-        timestamp_ms = int(dt_utc.timestamp() * 1000)
-        
-        # Yahoo cols: Open, High, Low, Close, Volume
-        open_ = float(row['Open'])
-        high_ = float(row['High'])
-        low_ = float(row['Low'])
-        close_ = float(row['Close'])
-        
-        # Volume might be NaN for indices like VIX
-        volume = float(row['Volume']) if not pd.isna(row['Volume']) else 0.0
-        
-        output_data.append([timestamp_ms, open_, high_, low_, close_, volume])
-        
-    # Sort by timestamp just in case
-    output_data.sort(key=lambda x: x[0])
-    
-    return output_data
+    # Convert index to UTC timestamps in milliseconds
+    timestamps_ms = (df.index.tz_convert(timezone.utc)
+                     .astype('int64') // 10**6)
+
+    # Fill NaN volumes (common for indices like VIX)
+    volumes = df['Volume'].fillna(0.0)
+
+    # Build array: [timestamp, open, high, low, close, volume]
+    result = pd.DataFrame({
+        'ts': timestamps_ms,
+        'open': df['Open'].astype(float),
+        'high': df['High'].astype(float),
+        'low': df['Low'].astype(float),
+        'close': df['Close'].astype(float),
+        'volume': volumes.astype(float),
+    })
+
+    # Sort by timestamp and return as list of lists
+    result = result.sort_values('ts')
+    return result.values.tolist()
 
 def save_to_json(data: list, pair_name: str, timeframe: str):
     # Sanitize pair name for filename (VIX/USDT -> VIX_USDT)
