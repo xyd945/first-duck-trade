@@ -16,6 +16,9 @@ user_data/plot/
 # Exchange logs
 user_data/logs/
 
+# Python virtual env
+.venv/
+
 # Python artifacts
 __pycache__/
 *.py[cod]

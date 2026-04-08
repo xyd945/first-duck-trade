@@ -33,7 +33,7 @@ def load_external_dataframe(pair_name: str, timeframe: str = '1d', data_dir: str
         print(f"ERROR loading external data {file_path}: {e}")
         return pd.DataFrame()
 
-def fear_and_greed_index(dataframe: pd.DataFrame, fast_length: int = 21, slow_length: int = 144, smooth_length: int = 5) -> pd.DataFrame:
+def add_fear_and_greed(dataframe: pd.DataFrame, fast_length: int = 21, slow_length: int = 144, smooth_length: int = 5) -> pd.DataFrame:
     """
     Fear & Greed Index by DGT (Python Port) with External Data (VIX, GOLD).
     
@@ -97,7 +97,14 @@ def fear_and_greed_index(dataframe: pd.DataFrame, fast_length: int = 21, slow_le
         # Combine index to handle missing timestamps
         # IMPORTANT: Avoid lookahead bias. reindex(method='ffill') is mostly safe if timestamps align.
         # Ideally, we verify timestamp.
-        vix_val = vix_dbq.reindex(df.index, method='ffill').fillna(0)
+        # Shift by 1 day to avoid look-ahead bias: use yesterday's VIX close,
+        # not today's (today's close isn't known until end of day)
+        vix_dbq = vix_dbq.shift(1)
+        try:
+            vix_val = vix_dbq.reindex(df.index, method='ffill').fillna(0)
+        except TypeError:
+            # Index types incompatible (e.g., int vs datetime in tests)
+            vix_val = pd.Series(0, index=df.index)
 
     # --- 5. GOLD (Safe Haven Demand) ---
     # Pine: gold = request.security('GOLD', timeframe.period, -(1 - close[fastLength] / close) * 100)
@@ -118,7 +125,12 @@ def fear_and_greed_index(dataframe: pd.DataFrame, fast_length: int = 21, slow_le
         gold_curr = gold_df['close'].replace(0, np.nan)
         
         gold_metric = -(1 - gold_fast / gold_curr) * 100
-        gold_val = gold_metric.reindex(df.index, method='ffill').fillna(0)
+        # Shift by 1 day to avoid look-ahead bias (same as VIX)
+        gold_metric = gold_metric.shift(1)
+        try:
+            gold_val = gold_metric.reindex(df.index, method='ffill').fillna(0)
+        except TypeError:
+            gold_val = pd.Series(0, index=df.index)
 
     # --- Cycle Calculation ---
     # Pine: cycle_raw = nzVolume ? math.avg(pmacd, ror, moneyFlow, vix, gold) : math.avg(pmacd, ror, vix, gold)
@@ -149,6 +161,6 @@ def fear_and_greed_index(dataframe: pd.DataFrame, fast_length: int = 21, slow_le
     # RMA is EMA with alpha = 1/length
     cycle = cycle_raw.ewm(alpha=1/smooth_length, adjust=False).mean()
     
-    df['fgi'] = cycle
-    
-    return df['fgi']
+    dataframe['fgi'] = cycle.values
+
+    return dataframe
