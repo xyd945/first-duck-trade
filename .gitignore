@@ -1,5 +1,6 @@
 # User specific configurations (API keys, etc.)
 user_data/config.json
+user_data/configs/
 
 # Freqtrade download data
 user_data/data/
@@ -23,6 +24,9 @@ user_data/logs/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# SQLite databases (per-instance)
+user_data/tradesv3*.sqlite
 
 # Jupyter Notebooks
 .ipynb_checkpoints
