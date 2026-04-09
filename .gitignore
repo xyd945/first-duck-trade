@@ -1,3 +1,6 @@
+# Environment variables (API keys)
+.env
+
 # User specific configurations (API keys, etc.)
 user_data/config.json
 user_data/configs/
