@@ -36,8 +36,9 @@ ALLOWED_IMPORT_PREFIXES = frozenset([
     "ta",
     "talib",
     "math",
-    "strategies",    # For importing BaseGeneratedStrategy
-    "indicators",    # For importing custom indicators
+    "strategies",       # For importing BaseGeneratedStrategy (full path)
+    "base_generated",   # For importing BaseGeneratedStrategy (relative)
+    "indicators",       # For importing custom indicators
 ])
 
 # Banned function calls (security)

@@ -28,8 +28,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# SQLite databases (per-instance)
+# SQLite databases (per-instance) and WAL/SHM files
 user_data/tradesv3*.sqlite
+user_data/tradesv3*.sqlite-shm
+user_data/tradesv3*.sqlite-wal
 
 # Jupyter Notebooks
 .ipynb_checkpoints
