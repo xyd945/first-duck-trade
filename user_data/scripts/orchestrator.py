@@ -26,7 +26,16 @@ from apscheduler.events import EVENT_JOB_ERROR
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).resolve().parent.parent  # user_data/
+# In Docker: script is at /app/scripts/, user_data is mounted at /app/user_data/
+# Locally: script is at user_data/scripts/, user_data is the parent
+_script_dir = Path(__file__).resolve().parent
+_candidate_base = _script_dir.parent  # user_data/ when running locally
+if (_candidate_base / "data").exists():
+    BASE_DIR = _candidate_base
+elif Path("/app/user_data").exists():
+    BASE_DIR = Path("/app/user_data")
+else:
+    BASE_DIR = _candidate_base
 DATA_DIR = BASE_DIR / "data"
 REGIME_STATE_FILE = BASE_DIR / "data" / "regime_state.json"
 RISK_STATE_FILE = BASE_DIR / "data" / "risk_state.json"
@@ -61,12 +70,15 @@ MODE = os.environ.get("ORCHESTRATOR_MODE", "dry-run")
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+log_dir = BASE_DIR / "logs"
+log_dir.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(BASE_DIR / "logs" / "orchestrator.log"),
+        logging.FileHandler(log_dir / "orchestrator.log"),
     ],
 )
 log = logging.getLogger("orchestrator")
@@ -388,6 +400,10 @@ def main():
 
     # --- Health check (every 2 minutes) ---
     scheduler.add_job(job_health_check, "interval", minutes=2, id="health_check")
+
+    # --- Wait for instances to be ready ---
+    log.info("Waiting 15s for Freqtrade instances to start...")
+    time.sleep(15)
 
     # --- Run initial jobs on startup ---
     log.info("Running initial regime classification...")
