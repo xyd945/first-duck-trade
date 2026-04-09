@@ -75,8 +75,9 @@ def format_for_freqtrade(df: pd.DataFrame) -> list:
     Timestamp should be in milliseconds.
     """
     # Convert index to UTC timestamps in milliseconds
-    timestamps_ms = (df.index.tz_convert(timezone.utc)
-                     .astype('int64') // 10**6)
+    # yfinance returns datetime64[s] — astype('int64') gives seconds, not nanoseconds
+    timestamps_s = df.index.tz_convert(timezone.utc).astype('int64')
+    timestamps_ms = timestamps_s * 1000
 
     # Fill NaN volumes (common for indices like VIX)
     volumes = df['Volume'].fillna(0.0)

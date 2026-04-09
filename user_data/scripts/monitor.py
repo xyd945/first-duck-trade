@@ -110,6 +110,30 @@ def get_system_status() -> dict:
         except Exception as e:
             status["registry"]["error"] = str(e)
 
+    # Macro data — latest values from Yahoo Finance JSON files
+    status["macro"] = {}
+    for pair_name, label in [("VIX/USDT", "VIX"), ("GOLD/USDT", "Gold"), ("SPX/USDT", "S&P 500"), ("DXY/USDT", "DXY")]:
+        filename = pair_name.replace("/", "_")
+        filepath = BASE_DIR / "data" / "binance" / f"{filename}-1d.json"
+        if filepath.exists():
+            try:
+                with open(filepath) as f:
+                    data_rows = json.load(f)
+                if len(data_rows) >= 2:
+                    last = data_rows[-1]
+                    prev = data_rows[-2]
+                    close = last[4]
+                    prev_close = prev[4]
+                    change_pct = ((close - prev_close) / prev_close * 100) if prev_close else 0
+                    ts_ms = last[0]
+                    status["macro"][label] = {
+                        "close": round(close, 2),
+                        "change_pct": round(change_pct, 2),
+                        "date": datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
+                    }
+            except Exception:
+                pass
+
     # Schedule — static definition + last run extraction from logs
     status["schedule"] = {
         "daily": [
@@ -270,6 +294,20 @@ async function load() {
     }).join('');
   }
 
+  // --- Build macro data cards ---
+  let macroHtml = '';
+  const macro = data.macro || {};
+  for (const [label, m] of Object.entries(macro)) {
+    const changeClass = m.change_pct >= 0 ? 'positive' : 'negative';
+    const arrow = m.change_pct >= 0 ? '&uarr;' : '&darr;';
+    macroHtml += '<div class="card" style="text-align:center">'
+      + '<div class="card-title">' + label + '</div>'
+      + '<div style="font-size:22px;font-weight:bold">' + m.close.toLocaleString() + '</div>'
+      + '<div class="' + changeClass + '" style="margin-top:4px">' + arrow + ' ' + m.change_pct.toFixed(2) + '%</div>'
+      + '<div style="color:#484f58;font-size:10px;margin-top:2px">' + m.date + '</div>'
+      + '</div>';
+  }
+
   // --- Build regime detail ---
   const adx = data.regime.adx ? data.regime.adx.toFixed(1) : 'N/A';
   const volPct = data.regime.vol_pct ? data.regime.vol_pct.toFixed(1) : 'N/A';
@@ -310,6 +348,12 @@ async function load() {
         <div style="margin-top:6px;color:#8b949e">${reg.total_backtests || 0} backtests run</div>
       </div>
     </div>
+
+    ${macroHtml ? `
+    <h2>Macro Data</h2>
+    <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(140px, 1fr))">
+      ${macroHtml}
+    </div>` : ''}
 
     <h2>Strategy Instances</h2>
     <div class="card">
