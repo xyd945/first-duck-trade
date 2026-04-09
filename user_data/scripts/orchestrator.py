@@ -372,6 +372,334 @@ def job_health_check():
 
 
 # ---------------------------------------------------------------------------
+# Weekly Jobs: Strategy Factory Loop
+# ---------------------------------------------------------------------------
+
+def job_generate_strategies():
+    """Weekly: generate new candidate strategies via LLM.
+
+    Generates strategies across different regimes, validates them,
+    and registers passing candidates in the registry.
+    """
+    log.info("=== Job: Generate strategies ===")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        log.warning("ANTHROPIC_API_KEY not set. Skipping strategy generation.")
+        return
+
+    try:
+        sys.path.insert(0, str(BASE_DIR / "scripts"))
+        from strategy_generator import generate_batch
+        from strategy_registry import register_strategy, get_registry_stats
+
+        # Get current regime for context
+        state = load_regime_state()
+        context = f"Current market regime: {state.get('regime', 'unknown')} (confidence: {state.get('confidence', 0)})"
+
+        # Get existing strategy results for context
+        stats = get_registry_stats()
+        existing_results = (
+            f"Registry stats: {stats['active']} active, {stats['candidate']} candidates, "
+            f"{stats['retired']} retired, {stats['total_backtests']} backtests run."
+        )
+
+        results = generate_batch(
+            count=5,
+            regimes=["trending", "ranging", "breakout", "all", "trending"],
+            context=context,
+            existing_results=existing_results,
+        )
+
+        # Register successful strategies
+        for r in results:
+            if r.get("success"):
+                filepath = r.get("filepath", "")
+                gen_id = r.get("generation_id", "")
+
+                # Extract class name and metadata from the file
+                try:
+                    import ast
+                    source = Path(filepath).read_text()
+                    tree = ast.parse(source)
+                    class_name = ""
+                    thesis = ""
+                    target_regime = "all"
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.ClassDef):
+                            class_name = node.name
+                            for item in node.body:
+                                if isinstance(item, ast.Assign):
+                                    for target in item.targets:
+                                        if isinstance(target, ast.Name):
+                                            if target.id == "STRATEGY_THESIS" and isinstance(item.value, ast.Constant):
+                                                thesis = item.value.value
+                                            elif target.id == "TARGET_REGIME" and isinstance(item.value, ast.Constant):
+                                                target_regime = item.value.value
+                            break
+
+                    if class_name:
+                        register_strategy(
+                            name=class_name,
+                            filepath=str(filepath),
+                            thesis=thesis,
+                            target_regime=target_regime,
+                            generation_id=gen_id,
+                        )
+                        log.info(f"  Registered: {class_name} (regime={target_regime})")
+                except Exception as e:
+                    log.warning(f"  Failed to register {filepath}: {e}")
+
+        passed = sum(1 for r in results if r.get("success"))
+        log.info(f"Generation complete: {passed}/{len(results)} strategies passed validation")
+
+    except Exception as e:
+        log.error(f"Strategy generation failed: {e}", exc_info=True)
+
+
+def job_backtest_candidates():
+    """Weekly (after generation): backtest all uneval'd candidates.
+
+    Runs the 2-stage evaluation (mini-backtest then full) on each
+    candidate that doesn't have backtest results yet.
+    """
+    log.info("=== Job: Backtest candidates ===")
+    try:
+        sys.path.insert(0, str(BASE_DIR / "scripts"))
+        from strategy_registry import get_candidates, record_backtest, promote_strategy, retire_strategy
+        from backtest_runner import run_backtest
+
+        candidates = get_candidates()
+        if not candidates:
+            log.info("No candidates to backtest.")
+            return
+
+        for cand in candidates[:10]:  # Cap at 10 per run to limit compute
+            name = cand["name"]
+            log.info(f"  Backtesting: {name}")
+
+            try:
+                result = run_backtest(
+                    strategy_name=name,
+                    use_sandbox=True,
+                    timeout_seconds=180,
+                )
+
+                if not result.get("success"):
+                    log.warning(f"  {name}: backtest failed — {result.get('error', 'unknown')}")
+                    retire_strategy(cand["id"], reason=f"Backtest failed: {result.get('error')}")
+                    continue
+
+                # Record results
+                record_backtest(cand["id"], result)
+
+                total_trades = result.get("total_trades", 0)
+                profit_pct = result.get("profit_total_pct", 0)
+                sharpe = result.get("sharpe", 0)
+
+                log.info(f"  {name}: {total_trades} trades, {profit_pct}% profit, Sharpe={sharpe}")
+
+                # Auto-promote if profitable with decent trade count
+                if total_trades >= 20 and profit_pct > 0 and sharpe > 0:
+                    promote_strategy(cand["id"])
+                    log.info(f"  {name}: AUTO-PROMOTED (profitable, Sharpe > 0)")
+                elif total_trades < 5:
+                    retire_strategy(cand["id"], reason=f"Too few trades: {total_trades}")
+                    log.info(f"  {name}: RETIRED (too few trades)")
+
+            except Exception as e:
+                log.warning(f"  {name}: error — {e}")
+
+    except Exception as e:
+        log.error(f"Candidate backtesting failed: {e}", exc_info=True)
+
+
+def job_reflector():
+    """Weekly: LLM reviews recent trades and proposes improvements.
+
+    Reads trade logs from all instances, analyzes wins/losses against
+    regime labels, and suggests regime-to-strategy mapping changes.
+    """
+    log.info("=== Job: Reflector agent ===")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        log.warning("ANTHROPIC_API_KEY not set. Skipping reflector.")
+        return
+
+    try:
+        import anthropic
+
+        # Collect trade data from all instances
+        trade_summary = []
+        for name, cfg in INSTANCES.items():
+            client = FreqtradeClient(cfg["url"], cfg["username"], cfg["password"])
+            profit = client.get_profit()
+            status = client.get_status()
+
+            instance_info = {
+                "instance": name,
+                "strategy": cfg["strategy"],
+                "active_regimes": cfg["regimes"],
+            }
+            if profit:
+                instance_info["profit_all"] = profit.get("profit_all_coin", 0)
+                instance_info["trade_count"] = profit.get("trade_count", 0)
+            if status:
+                instance_info["open_trades"] = len(status)
+
+            trade_summary.append(instance_info)
+
+        # Get regime history
+        regime_state = load_regime_state()
+        risk_state = load_risk_state()
+
+        # Get registry stats
+        sys.path.insert(0, str(BASE_DIR / "scripts"))
+        from strategy_registry import get_registry_stats, get_active_strategies
+        stats = get_registry_stats()
+        active = get_active_strategies()
+
+        # Build prompt
+        prompt = f"""You are a trading system reflector. Review the following weekly trading data
+and provide actionable insights.
+
+CURRENT REGIME: {regime_state.get('regime', 'unknown')} (confidence: {regime_state.get('confidence', 0)})
+RISK STATE: total_pnl={risk_state.get('total_pnl', 0)}, kill_switch={risk_state.get('kill_switch_active', False)}
+
+INSTANCE PERFORMANCE:
+{json.dumps(trade_summary, indent=2)}
+
+REGISTRY STATS: {json.dumps(stats)}
+ACTIVE STRATEGIES: {json.dumps([s['name'] for s in active])}
+
+Provide:
+1. PERFORMANCE SUMMARY: One paragraph on how the system performed this week.
+2. REGIME ACCURACY: Was the regime classification correct? Did strategies match?
+3. RECOMMENDATIONS: 2-3 specific, actionable suggestions. Examples:
+   - "Generate more ranging strategies — current ranging strategy underperforms"
+   - "Tighten stoploss on momentum strategy — large drawdowns on trend reversals"
+   - "Current regime thresholds may be too sensitive — 3 regime changes this week"
+4. RISK FLAGS: Any concerns about drawdown, exposure, or system health.
+
+Be specific. Reference actual numbers from the data above."""
+
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        reflection = response.content[0].text
+
+        # Save reflection to file
+        reflections_dir = BASE_DIR / "data" / "reflections"
+        reflections_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        reflection_file = reflections_dir / f"reflection-{timestamp}.md"
+        reflection_file.write_text(f"# Weekly Reflection — {timestamp}\n\n{reflection}\n")
+
+        log.info(f"Reflection saved to: {reflection_file}")
+        log.info(f"Reflection preview: {reflection[:200]}...")
+
+    except Exception as e:
+        log.error(f"Reflector failed: {e}", exc_info=True)
+
+
+def job_llm_regime_override():
+    """Daily (after indicator classification): LLM layer for regime.
+
+    Reads the indicator-based regime, macro data, and recent news
+    to potentially override or adjust the regime classification.
+    """
+    log.info("=== Job: LLM regime override ===")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        log.info("ANTHROPIC_API_KEY not set. Using indicator-only regime.")
+        return
+
+    try:
+        import anthropic
+
+        state = load_regime_state()
+        indicator_regime = state.get("regime", "ranging")
+        confidence = state.get("confidence", 0.5)
+
+        # Load macro data
+        macro_data = {}
+        for pair_name in ["VIX/USDT", "GOLD/USDT", "SPX/USDT", "DXY/USDT"]:
+            filename = pair_name.replace("/", "_")
+            filepath = DATA_DIR / "binance" / f"{filename}-1d.json"
+            if filepath.exists():
+                with open(filepath) as f:
+                    data = json.load(f)
+                if data:
+                    last = data[-1]
+                    macro_data[pair_name.split("/")[0]] = {
+                        "close": last[4],
+                        "change_1d": round((last[4] - data[-2][4]) / data[-2][4] * 100, 2) if len(data) > 1 else 0,
+                    }
+
+        prompt = f"""You are a crypto market regime classifier. Based on the data below,
+determine if the indicator-based regime classification is correct or should be overridden.
+
+INDICATOR REGIME: {indicator_regime} (confidence: {confidence})
+ADX: {state.get('adx', 'N/A')}
+Volatility percentile: {state.get('vol_pct', 'N/A')}
+
+MACRO DATA:
+{json.dumps(macro_data, indent=2)}
+
+REGIMES: trending, ranging, breakout, crisis
+
+Respond with EXACTLY one line in this format:
+REGIME: <regime> CONFIDENCE: <0.0-1.0> REASON: <one sentence>
+
+Only override if you have strong reason. The indicator regime is usually correct."""
+
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=100,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        text = response.content[0].text.strip()
+        log.info(f"LLM regime response: {text}")
+
+        # Parse response
+        if "REGIME:" in text and "CONFIDENCE:" in text:
+            parts = text.split("CONFIDENCE:")
+            regime_part = parts[0].replace("REGIME:", "").strip().lower()
+            conf_part = parts[1].split("REASON:")[0].strip()
+
+            valid_regimes = {"trending", "ranging", "breakout", "crisis"}
+            if regime_part in valid_regimes:
+                llm_confidence = float(conf_part)
+
+                # Only override if LLM confidence is higher than indicator
+                if llm_confidence > confidence and regime_part != indicator_regime:
+                    log.info(f"LLM OVERRIDE: {indicator_regime} -> {regime_part} (conf: {llm_confidence})")
+                    save_regime_state({
+                        "regime": regime_part,
+                        "confidence": llm_confidence,
+                        "source": "llm",
+                        "indicator_regime": indicator_regime,
+                        "llm_reason": text.split("REASON:")[-1].strip() if "REASON:" in text else "",
+                    })
+                else:
+                    log.info(f"LLM agrees with indicator regime: {indicator_regime}")
+                    state["source"] = "indicator+llm"
+                    save_regime_state(state)
+
+    except Exception as e:
+        log.error(f"LLM regime override failed: {e}", exc_info=True)
+        log.info("Falling back to indicator-only regime.")
+
+
+# ---------------------------------------------------------------------------
 # Error Handler
 # ---------------------------------------------------------------------------
 def on_job_error(event):
@@ -389,11 +717,17 @@ def main():
     scheduler = BlockingScheduler(timezone="UTC")
     scheduler.add_listener(on_job_error, EVENT_JOB_ERROR)
 
-    # --- Daily jobs (chained: fetch -> classify -> apply) ---
+    # --- Daily jobs (chained: fetch -> classify -> LLM override -> apply) ---
     # Run at 00:05 UTC daily (after daily candle close)
     scheduler.add_job(job_fetch_macro_data, "cron", hour=0, minute=5, id="fetch_macro")
     scheduler.add_job(job_classify_regime, "cron", hour=0, minute=10, id="classify_regime")
+    scheduler.add_job(job_llm_regime_override, "cron", hour=0, minute=12, id="llm_regime")
     scheduler.add_job(job_apply_regime, "cron", hour=0, minute=15, id="apply_regime")
+
+    # --- Weekly jobs: Strategy Factory Loop (Sundays at 02:00 UTC) ---
+    scheduler.add_job(job_generate_strategies, "cron", day_of_week="sun", hour=2, minute=0, id="generate_strategies")
+    scheduler.add_job(job_backtest_candidates, "cron", day_of_week="sun", hour=2, minute=30, id="backtest_candidates")
+    scheduler.add_job(job_reflector, "cron", day_of_week="sun", hour=3, minute=0, id="reflector")
 
     # --- Risk monitoring (every 5 minutes) ---
     scheduler.add_job(job_check_risk, "interval", minutes=5, id="check_risk")

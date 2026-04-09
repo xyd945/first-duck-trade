@@ -45,13 +45,14 @@ RULES:
 5. NO file I/O, NO network calls, NO exec/eval, NO os/sys/subprocess
 6. NO .shift(-N) — that's look-ahead bias (accessing future data)
 7. NO .rolling(center=True) — that's also look-ahead bias
-8. Always use .shift(1) or more to reference past data for signals
+8. NO ta.vwap() — it requires DatetimeIndex which breaks in Freqtrade backtesting. Use EMA of typical price ((high+low+close)/3) instead.
+9. Always use .shift(1) or more to reference past data for signals
 9. Use vectorized pandas operations, NO for loops over rows
 10. Timeframe is 1h. startup_candle_count should be >= 200.
 
 AVAILABLE INDICATORS (via pandas_ta):
 - ta.ema, ta.sma, ta.rsi, ta.macd, ta.bbands, ta.adx, ta.atr
-- ta.stoch, ta.willr, ta.cci, ta.mfi, ta.obv, ta.vwap
+- ta.stoch, ta.willr, ta.cci, ta.mfi, ta.obv
 - ta.alma, ta.kc, ta.donchian, ta.ichimoku
 - numpy: np.where, np.nan
 - DataFrame: .rolling(), .shift(), .pct_change(), .rank()
