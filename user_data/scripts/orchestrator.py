@@ -101,7 +101,7 @@ class FreqtradeClient:
         try:
             resp = self.session.post(
                 f"{self.base_url}/api/v1/token/login",
-                data={"username": self._username, "password": self._password},
+                auth=(self._username, self._password),
                 timeout=10,
             )
             resp.raise_for_status()
