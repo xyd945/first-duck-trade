@@ -34,9 +34,19 @@ RISK_STATE_FILE = BASE_DIR / "data" / "risk_state.json"
 REGISTRY_DB = BASE_DIR / "data" / "strategy_registry.db"
 LOG_FILE = BASE_DIR / "logs" / "orchestrator.log"
 
+# When running in Docker, use container names. When running locally, use localhost ports.
+_in_docker = Path("/app/user_data").exists()
 INSTANCES = {
-    "ft-sweep": {"url": "http://localhost:8081", "strategy": "LiquiditySweepStrategy", "regimes": ["ranging"]},
-    "ft-momentum": {"url": "http://localhost:8082", "strategy": "MomentumTrendStrategy", "regimes": ["trending", "breakout"]},
+    "ft-sweep": {
+        "url": "http://ft-sweep:8080" if _in_docker else "http://localhost:8081",
+        "strategy": "LiquiditySweepStrategy",
+        "regimes": ["ranging"],
+    },
+    "ft-momentum": {
+        "url": "http://ft-momentum:8080" if _in_docker else "http://localhost:8082",
+        "strategy": "MomentumTrendStrategy",
+        "regimes": ["trending", "breakout"],
+    },
 }
 
 
@@ -109,7 +119,7 @@ def get_system_status() -> dict:
     return status
 
 
-DASHBOARD_HTML = r"""<!DOCTYPE html>
+DASHBOARD_HTML = """<!DOCTYPE html>
 <html>
 <head>
 <title>Strategy Factory Dashboard</title>
@@ -191,22 +201,22 @@ async function load() {
     }).join('\\n');
   }
 
-  d.innerHTML = \`
+  d.innerHTML = `
     <div class="grid">
-      <div class="card \${killSwitch ? 'kill-switch' : ''}">
+      <div class="card ${killSwitch ? 'kill-switch' : ''}">
         <div class="card-title">Current Regime</div>
-        <div class="value \${regimeClass}">\${regime.toUpperCase()}</div>
-        <div style="margin-top:6px;color:#8b949e">Confidence: \${confidence}% &middot; Source: \${source}</div>
+        <div class="value ${regimeClass}">${regime.toUpperCase()}</div>
+        <div style="margin-top:6px;color:#8b949e">Confidence: ${confidence}% &middot; Source: ${source}</div>
       </div>
-      <div class="card \${killSwitch ? 'kill-switch' : ''}">
+      <div class="card ${killSwitch ? 'kill-switch' : ''}">
         <div class="card-title">Risk</div>
-        <div class="value \${totalPnl >= 0 ? 'positive' : 'negative'}">\${totalPnl >= 0 ? '+' : ''}\${totalPnl.toFixed(2)} USDT</div>
-        <div style="margin-top:6px;color:#8b949e">\${killSwitch ? '🔴 KILL SWITCH ACTIVE' : '🟢 Normal'}</div>
+        <div class="value ${totalPnl >= 0 ? 'positive' : 'negative'}">${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)} USDT</div>
+        <div style="margin-top:6px;color:#8b949e">${killSwitch ? '🔴 KILL SWITCH ACTIVE' : '🟢 Normal'}</div>
       </div>
       <div class="card">
         <div class="card-title">Registry</div>
-        <div style="font-size:18px">\${reg.active || 0} active &middot; \${reg.candidate || 0} candidates &middot; \${reg.retired || 0} retired</div>
-        <div style="margin-top:6px;color:#8b949e">\${reg.total_backtests || 0} backtests run</div>
+        <div style="font-size:18px">${reg.active || 0} active &middot; ${reg.candidate || 0} candidates &middot; ${reg.retired || 0} retired</div>
+        <div style="margin-top:6px;color:#8b949e">${reg.total_backtests || 0} backtests run</div>
       </div>
     </div>
 
@@ -214,24 +224,24 @@ async function load() {
     <div class="card">
       <table>
         <tr><th>Container</th><th>Strategy</th><th>Status</th><th>Trading</th><th>Active Regimes</th></tr>
-        \${instancesHtml}
+        ${instancesHtml}
       </table>
     </div>
 
-    \${registryHtml ? \`
+    ${registryHtml ? `
     <h2>Top Strategies (by Sharpe)</h2>
     <div class="card">
       <table>
         <tr><th>Name</th><th>Regime</th><th>Status</th><th>Sharpe</th><th>Profit</th><th>Trades</th></tr>
-        \${registryHtml}
+        ${registryHtml}
       </table>
-    </div>\` : ''}
+    </div>` : ''}
 
     <h2>Recent Logs</h2>
-    <div class="logs">\${logsHtml || 'No logs available'}</div>
+    <div class="logs">${logsHtml || 'No logs available'}</div>
 
-    <div class="footer">Auto-refreshes every 30 seconds &middot; \${new Date(data.timestamp).toLocaleString()}</div>
-  \`;
+    <div class="footer">Auto-refreshes every 30 seconds &middot; ${new Date(data.timestamp).toLocaleString()}</div>
+  `;
 }
 load();
 </script>
