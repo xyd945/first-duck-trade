@@ -102,8 +102,8 @@ def add_fear_and_greed(dataframe: pd.DataFrame, fast_length: int = 21, slow_leng
         vix_dbq = vix_dbq.shift(1)
         try:
             vix_val = vix_dbq.reindex(df.index, method='ffill').fillna(0)
-        except TypeError:
-            # Index types incompatible (e.g., int vs datetime in tests)
+        except (TypeError, ValueError):
+            # Index types incompatible or duplicate labels
             vix_val = pd.Series(0, index=df.index)
 
     # --- 5. GOLD (Safe Haven Demand) ---
@@ -129,7 +129,7 @@ def add_fear_and_greed(dataframe: pd.DataFrame, fast_length: int = 21, slow_leng
         gold_metric = gold_metric.shift(1)
         try:
             gold_val = gold_metric.reindex(df.index, method='ffill').fillna(0)
-        except TypeError:
+        except (TypeError, ValueError):
             gold_val = pd.Series(0, index=df.index)
 
     # --- Cycle Calculation ---
