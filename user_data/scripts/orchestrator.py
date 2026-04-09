@@ -14,6 +14,21 @@ import json
 import logging
 import os
 import subprocess
+
+# Notification helper (graceful if not configured)
+try:
+    from notifier import (
+        notify_regime_change, notify_kill_switch, notify_strategy_promoted,
+        notify_factory_summary, notify_instance_down, notify_reflector_summary,
+    )
+except ImportError:
+    # Stub out if notifier not available
+    def notify_regime_change(*a, **kw): pass
+    def notify_kill_switch(*a, **kw): pass
+    def notify_strategy_promoted(*a, **kw): pass
+    def notify_factory_summary(*a, **kw): pass
+    def notify_instance_down(*a, **kw): pass
+    def notify_reflector_summary(*a, **kw): pass
 import sys
 import time
 from datetime import datetime, timezone
@@ -289,6 +304,13 @@ def job_apply_regime():
                 client.stop()
         return
 
+    # Detect regime change and notify
+    prev_regime = risk.get("last_regime", "unknown")
+    if regime != prev_regime and prev_regime != "unknown":
+        notify_regime_change(prev_regime, regime, state.get("confidence", 0), state.get("source", ""))
+    risk["last_regime"] = regime
+    save_risk_state(risk)
+
     log.info(f"Current regime: {regime}")
 
     # Crisis = stop everything
@@ -356,6 +378,7 @@ def job_check_risk():
         risk["total_pnl"] = total_pnl
         risk["trigger_reason"] = f"Drawdown {drawdown_pct:.1f}%"
         save_risk_state(risk)
+        notify_kill_switch(risk["trigger_reason"], total_pnl)
         return
 
     risk["total_pnl"] = total_pnl
@@ -369,6 +392,8 @@ def job_health_check():
         alive = client.is_alive()
         status = "UP" if alive else "DOWN"
         log.info(f"  Health: {name} = {status}")
+        if not alive:
+            notify_instance_down(name)
 
 
 # ---------------------------------------------------------------------------

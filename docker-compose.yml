@@ -80,6 +80,23 @@ services:
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - ORCHESTRATOR_MODE=${ORCHESTRATOR_MODE:-dry-run}
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
     depends_on:
       - freqtrade-sweep
       - freqtrade-momentum
+
+  # ==========================================================================
+  # Monitoring Dashboard
+  # ==========================================================================
+  monitor:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.orchestrator
+    restart: unless-stopped
+    container_name: ft-monitor
+    volumes:
+      - "./user_data:/app/user_data"
+    ports:
+      - "127.0.0.1:8888:8888"
+    command: ["python", "scripts/monitor.py"]
