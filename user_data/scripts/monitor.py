@@ -58,6 +58,8 @@ def get_system_status() -> dict:
         "risk": {},
         "instances": {},
         "registry": {},
+        "schedule": {},
+        "reflections": [],
         "recent_logs": [],
     }
 
@@ -107,6 +109,64 @@ def get_system_status() -> dict:
             conn.close()
         except Exception as e:
             status["registry"]["error"] = str(e)
+
+    # Schedule — static definition + last run extraction from logs
+    status["schedule"] = {
+        "daily": [
+            {"time": "00:05 UTC", "job": "Fetch macro data", "id": "fetch_macro", "source": "Yahoo Finance (VIX, Gold, DXY, SPX)"},
+            {"time": "00:10 UTC", "job": "Classify regime", "id": "classify_regime", "source": "Indicators (ADX, EMA, volatility, F&G)"},
+            {"time": "00:12 UTC", "job": "LLM regime override", "id": "llm_regime", "source": "Claude Haiku + macro data"},
+            {"time": "00:15 UTC", "job": "Apply regime", "id": "apply_regime", "source": "Start/stop strategy instances"},
+            {"time": "Every 5min", "job": "Risk monitoring", "id": "check_risk", "source": "Drawdown check, -10% kill switch"},
+            {"time": "Every 2min", "job": "Health check", "id": "health_check", "source": "Ping all instances"},
+        ],
+        "weekly": [
+            {"time": "Sun 02:00 UTC", "job": "Generate strategies", "id": "generate_strategies", "source": "Claude Sonnet, 5 strategies across regimes"},
+            {"time": "Sun 02:30 UTC", "job": "Backtest candidates", "id": "backtest_candidates", "source": "Sandboxed Docker, 2-stage evaluation"},
+            {"time": "Sun 03:00 UTC", "job": "Reflector agent", "id": "reflector", "source": "Claude Haiku, weekly trade review"},
+        ],
+    }
+
+    # Extract last run times from logs for each job
+    if LOG_FILE.exists():
+        try:
+            log_text = LOG_FILE.read_text()
+            for group in ("daily", "weekly"):
+                for job in status["schedule"][group]:
+                    job_id = job["id"]
+                    # Find last "=== Job:" line for this job
+                    last_run = None
+                    last_status = "unknown"
+                    for line in log_text.split("\n"):
+                        if f"Job: {job['job']}" in line or f'job_{job_id}' in line:
+                            # Extract timestamp from log line
+                            if line[:19].replace("-", "").replace(":", "").replace(" ", "").isdigit() or line[:10].startswith("202"):
+                                last_run = line[:19]
+                        if f'job_{job_id}' in line and "executed successfully" in line:
+                            last_status = "success"
+                            if line[:19].replace("-", "").replace(":", "").replace(" ", "").isdigit() or line[:10].startswith("202"):
+                                last_run = line[:19]
+                        elif f'job_{job_id}' in line and ("ERROR" in line or "failed" in line.lower()):
+                            last_status = "error"
+                    job["last_run"] = last_run
+                    job["last_status"] = last_status
+        except Exception:
+            pass
+
+    # Reflections — load recent weekly reflections
+    reflections_dir = BASE_DIR / "data" / "reflections"
+    if reflections_dir.exists():
+        try:
+            files = sorted(reflections_dir.glob("reflection-*.md"), reverse=True)[:3]
+            for f in files:
+                content = f.read_text()
+                status["reflections"].append({
+                    "filename": f.name,
+                    "date": f.name.replace("reflection-", "").replace(".md", "")[:8],
+                    "preview": content[:500],
+                })
+        except Exception:
+            pass
 
     # Recent logs
     if LOG_FILE.exists():
@@ -173,6 +233,7 @@ async function load() {
   const killSwitch = data.risk.kill_switch_active;
   const totalPnl = data.risk.total_pnl || 0;
 
+  // --- Build instances table ---
   let instancesHtml = '';
   for (const [name, info] of Object.entries(data.instances)) {
     const statusClass = info.status === 'UP' ? 'status-up' : 'status-down';
@@ -182,15 +243,43 @@ async function load() {
     instancesHtml += '<tr><td>' + name + '</td><td>' + info.strategy + '</td><td class="' + statusClass + '">' + info.status + '</td><td>' + tradingLabel + '</td><td>' + info.regimes.join(', ') + '</td></tr>';
   }
 
+  // --- Build registry table ---
   let registryHtml = '';
   const reg = data.registry;
-  if (reg.top_strategies) {
+  if (reg.top_strategies && reg.top_strategies.length > 0) {
     for (const s of reg.top_strategies) {
       const profitClass = s.profit_pct > 0 ? 'positive' : 'negative';
       registryHtml += '<tr><td>' + s.name + '</td><td>' + s.regime + '</td><td>' + s.status + '</td><td>' + (s.sharpe || 0).toFixed(2) + '</td><td class="' + profitClass + '">' + (s.profit_pct || 0).toFixed(1) + '%</td><td>' + (s.trades || 0) + '</td></tr>';
     }
   }
 
+  // --- Build schedule tables ---
+  function buildScheduleRows(jobs) {
+    return jobs.map(j => {
+      const statusIcon = j.last_status === 'success' ? '&#x2705;' : j.last_status === 'error' ? '&#x274C;' : '&#x2796;';
+      const lastRun = j.last_run || 'Never';
+      return '<tr><td>' + j.time + '</td><td>' + j.job + '</td><td>' + j.source + '</td><td>' + statusIcon + '</td><td style="color:#8b949e;font-size:11px">' + lastRun + '</td></tr>';
+    }).join('');
+  }
+
+  // --- Build reflections ---
+  let reflectionsHtml = '';
+  if (data.reflections && data.reflections.length > 0) {
+    reflectionsHtml = data.reflections.map(r => {
+      return '<div class="card" style="margin-bottom:8px"><div class="card-title">Reflection ' + r.date + '</div><div style="font-size:12px;line-height:1.5;white-space:pre-wrap">' + r.preview.replace(/</g, '&lt;').replace(/\\n/g, '<br>') + '</div></div>';
+    }).join('');
+  }
+
+  // --- Build regime detail ---
+  const adx = data.regime.adx ? data.regime.adx.toFixed(1) : 'N/A';
+  const volPct = data.regime.vol_pct ? data.regime.vol_pct.toFixed(1) : 'N/A';
+  const indicatorRegime = data.regime.indicator_regime || '';
+  const llmReason = data.regime.llm_reason || '';
+  let regimeDetail = 'ADX: ' + adx + ' &middot; Vol %ile: ' + volPct;
+  if (indicatorRegime) regimeDetail += '<br>Indicator said: ' + indicatorRegime + ', LLM overrode';
+  if (llmReason) regimeDetail += '<br>LLM reason: ' + llmReason;
+
+  // --- Build logs ---
   let logsHtml = '';
   if (data.recent_logs) {
     logsHtml = data.recent_logs.map(l => {
@@ -201,31 +290,54 @@ async function load() {
     }).join('\\n');
   }
 
+  // --- Render ---
   d.innerHTML = `
     <div class="grid">
       <div class="card ${killSwitch ? 'kill-switch' : ''}">
         <div class="card-title">Current Regime</div>
         <div class="value ${regimeClass}">${regime.toUpperCase()}</div>
         <div style="margin-top:6px;color:#8b949e">Confidence: ${confidence}% &middot; Source: ${source}</div>
+        <div style="margin-top:4px;color:#484f58;font-size:11px">${regimeDetail}</div>
       </div>
       <div class="card ${killSwitch ? 'kill-switch' : ''}">
         <div class="card-title">Risk</div>
         <div class="value ${totalPnl >= 0 ? 'positive' : 'negative'}">${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)} USDT</div>
-        <div style="margin-top:6px;color:#8b949e">${killSwitch ? '🔴 KILL SWITCH ACTIVE' : '🟢 Normal'}</div>
+        <div style="margin-top:6px;color:#8b949e">${killSwitch ? '<span style="color:#f85149">KILL SWITCH ACTIVE</span>' : '<span style="color:#3fb950">Normal</span>'}</div>
       </div>
       <div class="card">
-        <div class="card-title">Registry</div>
+        <div class="card-title">Strategy Registry</div>
         <div style="font-size:18px">${reg.active || 0} active &middot; ${reg.candidate || 0} candidates &middot; ${reg.retired || 0} retired</div>
         <div style="margin-top:6px;color:#8b949e">${reg.total_backtests || 0} backtests run</div>
       </div>
     </div>
 
-    <h2>Instances</h2>
+    <h2>Strategy Instances</h2>
     <div class="card">
       <table>
         <tr><th>Container</th><th>Strategy</th><th>Status</th><th>Trading</th><th>Active Regimes</th></tr>
         ${instancesHtml}
       </table>
+    </div>
+
+    <div class="grid" style="margin-top:16px">
+      <div>
+        <h2>Daily Schedule</h2>
+        <div class="card">
+          <table>
+            <tr><th>Time</th><th>Job</th><th>Source</th><th></th><th>Last Run</th></tr>
+            ${buildScheduleRows(data.schedule.daily || [])}
+          </table>
+        </div>
+      </div>
+      <div>
+        <h2>Weekly Schedule (Sunday)</h2>
+        <div class="card">
+          <table>
+            <tr><th>Time</th><th>Job</th><th>Source</th><th></th><th>Last Run</th></tr>
+            ${buildScheduleRows(data.schedule.weekly || [])}
+          </table>
+        </div>
+      </div>
     </div>
 
     ${registryHtml ? `
@@ -237,7 +349,11 @@ async function load() {
       </table>
     </div>` : ''}
 
-    <h2>Recent Logs</h2>
+    ${reflectionsHtml ? `
+    <h2>Recent Reflections</h2>
+    ${reflectionsHtml}` : ''}
+
+    <h2>Orchestrator Logs</h2>
     <div class="logs">${logsHtml || 'No logs available'}</div>
 
     <div class="footer">Auto-refreshes every 30 seconds &middot; ${new Date(data.timestamp).toLocaleString()}</div>
