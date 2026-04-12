@@ -13,6 +13,7 @@ Results are parsed and returned as structured dicts for the strategy registry.
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,12 @@ log = logging.getLogger("backtest_runner")
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # user_data/
 PROJECT_ROOT = BASE_DIR.parent
+
+# When running inside Docker, volume paths in docker-compose.yml are relative
+# to the host project directory, not the container's filesystem.
+# The compose file is mounted at /app/docker-compose.yml; we tell compose
+# to resolve relative paths against the host project dir via --project-directory.
+HOST_PROJECT_DIR = os.environ.get("HOST_PROJECT_DIR", str(PROJECT_ROOT))
 RESULTS_DIR = BASE_DIR / "backtest_results"
 
 
@@ -76,19 +83,28 @@ def run_backtest(
     if config_path is None:
         config_path = "/freqtrade/user_data/config.json"
 
-    cmd = [
-        "docker", "compose", "run", "--rm",
-    ]
+    # Compose file is mounted at /app/docker-compose.yml inside the orchestrator.
+    # --project-directory must point to the HOST path so volume mounts resolve correctly.
+    compose_file = str(PROJECT_ROOT / "docker-compose.yml")
+    cmd = ["docker", "compose",
+           "-f", compose_file,
+           "--project-directory", HOST_PROJECT_DIR]
 
     if use_sandbox:
-        # Use the sandboxed profile
-        cmd.extend(["--profile", "backtest", "freqtrade-backtest"])
+        # Use the sandboxed profile (--profile must come before 'run')
+        cmd.extend(["--profile", "backtest"])
+
+    cmd.extend(["run", "--rm"])
+
+    if use_sandbox:
+        cmd.append("freqtrade-backtest")
     else:
         cmd.append("freqtrade-sweep")  # Use any running instance
 
     cmd.extend([
         "backtesting",
         "--strategy", strategy_name,
+        "--strategy-path", "/freqtrade/user_data/strategies/candidates",
         "--timeframe", timeframe,
         "--config", config_path,
         "--export", "none",  # Don't export trade details to save disk
