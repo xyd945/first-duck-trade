@@ -244,7 +244,9 @@ def job_classify_regime():
         import pandas_ta as ta
 
         # Try to load BTC 1h data
-        btc_file = DATA_DIR / "okx" / "futures" / "BTC_USDT_USDT-1h-futures.feather"
+        btc_file = DATA_DIR / "okx" / "BTC_USDT-1h.feather"
+        if not btc_file.exists():
+            btc_file = DATA_DIR / "okx" / "futures" / "BTC_USDT_USDT-1h-futures.feather"
         if not btc_file.exists():
             btc_file = DATA_DIR / "binance" / "BTC_USDT-1h.feather"
 

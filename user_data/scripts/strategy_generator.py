@@ -35,9 +35,9 @@ CANDIDATES_DIR.mkdir(parents=True, exist_ok=True)
 # Prompt Template
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """You are an expert algorithmic trading strategy developer for the Freqtrade framework.
-You write Python strategies that extend BaseGeneratedStrategy for crypto futures (BTC/ETH/SOL on USDT).
+You write Python strategies that extend BaseGeneratedStrategy for SPOT crypto trading (BTC/ETH/SOL/XRP on USDT).
 
-RULES:
+CRITICAL RULES:
 1. The strategy MUST extend BaseGeneratedStrategy (import with: from base_generated import BaseGeneratedStrategy)
 2. You MUST implement: populate_indicators, populate_entry_trend, populate_exit_trend
 3. You MUST set class attributes: STRATEGY_THESIS, TARGET_REGIME, GENERATION_ID
@@ -45,17 +45,68 @@ RULES:
 5. NO file I/O, NO network calls, NO exec/eval, NO os/sys/subprocess
 6. NO .shift(-N) — that's look-ahead bias (accessing future data)
 7. NO .rolling(center=True) — that's also look-ahead bias
-8. NO ta.vwap() — it requires DatetimeIndex which breaks in Freqtrade backtesting. Use EMA of typical price ((high+low+close)/3) instead.
+8. NO ta.vwap() — it requires DatetimeIndex which breaks in Freqtrade backtesting
 9. Always use .shift(1) or more to reference past data for signals
-9. Use vectorized pandas operations, NO for loops over rows
-10. Timeframe is 1h. startup_candle_count should be >= 200.
+10. Use vectorized pandas operations, NO for loops over rows
+11. Timeframe is 1h. startup_candle_count should be >= 200.
+12. SPOT TRADING ONLY — LONG entries only. Do NOT set can_short = True. Do NOT generate short signals.
+13. Entry signals use 'enter_long' column. Exit signals use 'exit_long' column.
 
-AVAILABLE INDICATORS (via pandas_ta):
-- ta.ema, ta.sma, ta.rsi, ta.macd, ta.bbands, ta.adx, ta.atr
-- ta.stoch, ta.willr, ta.cci, ta.mfi, ta.obv
-- ta.alma, ta.kc, ta.donchian, ta.ichimoku
-- numpy: np.where, np.nan
-- DataFrame: .rolling(), .shift(), .pct_change(), .rank()
+PANDAS_TA COLUMN NAMING — THIS IS CRITICAL, get it right:
+pandas_ta encodes parameters into column names. You MUST use the exact column names.
+We use pandas_ta 0.3.16 (stable). The column naming is specific to this version.
+
+IMPORTANT: To avoid column name mismatches with hyperopt parameters, ALWAYS use
+HARDCODED literal values for indicator lengths/periods, NOT hyperopt parameter values.
+Use hyperopt parameters only for thresholds and signal conditions, NOT for indicator computation.
+
+ta.donchian(high, low, lower_length=N, upper_length=N):
+  Columns: 'DCL_N_N', 'DCM_N_N', 'DCU_N_N'
+  Example: ta.donchian(df['high'], df['low'], lower_length=20, upper_length=20)
+    -> 'DCL_20_20', 'DCM_20_20', 'DCU_20_20'
+
+ta.bbands(close, length=N, std=S):
+  Columns: 'BBL_N_S', 'BBM_N_S', 'BBU_N_S', 'BBB_N_S', 'BBP_N_S'
+  Example: ta.bbands(df['close'], length=20, std=2.0)
+    -> 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0', 'BBB_20_2.0', 'BBP_20_2.0'
+
+ta.macd(close, fast=F, slow=S, signal=SIG):
+  Columns: 'MACD_F_S_SIG', 'MACDh_F_S_SIG', 'MACDs_F_S_SIG'
+  Example: ta.macd(df['close']) -> 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9'
+
+ta.stoch(high, low, close, k=K, d=D, smooth_k=SK):
+  Columns: 'STOCHk_K_D_SK', 'STOCHd_K_D_SK'
+  Example: ta.stoch(df['high'], df['low'], df['close']) -> 'STOCHk_14_3_3', 'STOCHd_14_3_3'
+
+ta.kc(high, low, close, length=N, scalar=S):
+  Columns: 'KCLe_N_S', 'KCBe_N_S', 'KCUe_N_S'  (note: S is float in column name)
+  Example: ta.kc(df['high'], df['low'], df['close'], length=20, scalar=2)
+    -> 'KCLe_20_2.0', 'KCBe_20_2.0', 'KCUe_20_2.0'
+
+ta.adx(high, low, close, length=N):
+  Columns: 'ADX_N', 'DMP_N', 'DMN_N'
+  Example: ta.adx(df['high'], df['low'], df['close'], length=14) -> 'ADX_14', 'DMP_14', 'DMN_14'
+
+Simple indicators (return a single Series, assign directly):
+  ta.ema(close, length=N), ta.sma(close, length=N), ta.rsi(close, length=N),
+  ta.atr(high, low, close, length=N), ta.cci(high, low, close, length=N),
+  ta.willr(high, low, close, length=N), ta.mfi(high, low, close, volume, length=N)
+
+CORRECT PATTERN — hardcode indicator params, use hyperopt for thresholds:
+  # In populate_indicators — use LITERAL values:
+  bb = ta.bbands(dataframe['close'], length=20, std=2.0)
+  dataframe['bb_upper'] = bb['BBU_20_2.0']
+  dataframe['bb_lower'] = bb['BBL_20_2.0']
+  dataframe['bb_mid'] = bb['BBM_20_2.0']
+  dataframe['bb_pct'] = bb['BBP_20_2.0']
+
+  donchian = ta.donchian(dataframe['high'], dataframe['low'], lower_length=20, upper_length=20)
+  dataframe['dc_upper'] = donchian['DCU_20_20']
+  dataframe['dc_lower'] = donchian['DCL_20_20']
+
+  # In populate_entry_trend — use hyperopt params for THRESHOLDS:
+  rsi_oversold = IntParameter(20, 40, default=30, space="buy")
+  # ... (dataframe['rsi'] < self.rsi_oversold.value) ...
 
 OUTPUT: Return ONLY the Python code. No explanations, no markdown fences, just the .py file content.
 """
@@ -69,7 +120,7 @@ def build_generation_prompt(
 ) -> str:
     """Build the user prompt for strategy generation."""
 
-    prompt = f"""Generate a new Freqtrade trading strategy for crypto futures.
+    prompt = f"""Generate a new Freqtrade trading strategy for SPOT crypto trading (LONG only, no shorting).
 
 TARGET REGIME: {target_regime}
 GENERATION ID: {generation_id}

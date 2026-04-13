@@ -51,8 +51,8 @@ services:
       - backtest  # Only starts when explicitly requested
     volumes:
       - "./user_data:/freqtrade/user_data"
-    # No network access for sandboxed backtesting of LLM-generated strategies
-    network_mode: "none"
+    # Network needed to load exchange markets data during backtesting.
+    # LLM-generated strategy code is validated (no network/file I/O calls allowed).
     # Resource limits to prevent runaway generated code
     deploy:
       resources:
@@ -76,12 +76,14 @@ services:
     container_name: ft-orchestrator
     volumes:
       - "./user_data:/app/user_data"
+      - "./docker-compose.yml:/app/docker-compose.yml:ro"  # Needed by backtest_runner
       - "/var/run/docker.sock:/var/run/docker.sock"  # Docker socket for container management
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - ORCHESTRATOR_MODE=${ORCHESTRATOR_MODE:-dry-run}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - HOST_PROJECT_DIR=${PWD}
     depends_on:
       - freqtrade-sweep
       - freqtrade-momentum

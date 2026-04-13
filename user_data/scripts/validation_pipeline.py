@@ -234,6 +234,10 @@ def check_structure(tree: ast.Module, result: ValidationResult):
         if attr not in assigns:
             result.warn(f"Missing class attribute: {attr} (recommended but not required)")
 
+    # Reject short strategies — we trade SPOT only
+    if "can_short" in assigns:
+        result.fail("can_short is not allowed. We trade SPOT only (long entries only).")
+
 
 # ---------------------------------------------------------------------------
 # Public API
