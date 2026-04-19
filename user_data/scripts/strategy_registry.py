@@ -8,7 +8,8 @@ The orchestrator is the single writer. All other components read only.
 
 Schema:
   strategies: id, name, filepath, thesis, target_regime, generation_id,
-              status, created_at, promoted_at, retired_at
+              status, created_at, promoted_at, retired_at,
+              failure_reason, failure_verdict
   backtest_results: id, strategy_id, timerange, sharpe, max_drawdown_pct,
                     profit_total_pct, profit_factor, total_trades, win_rate,
                     backtest_days, created_at
@@ -24,6 +25,7 @@ log = logging.getLogger("strategy_registry")
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # user_data/
 DB_PATH = BASE_DIR / "data" / "strategy_registry.db"
+REFLECTIONS_DIR = BASE_DIR / "data" / "reflections"
 
 # Pool limits
 MAX_ACTIVE = 10
@@ -39,8 +41,24 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+def _column_names(conn: sqlite3.Connection, table: str) -> set:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {r["name"] if isinstance(r, sqlite3.Row) else r[1] for r in rows}
+
+
+def _migrate_failure_columns(conn: sqlite3.Connection):
+    """Add failure_reason + failure_verdict columns to existing DBs."""
+    cols = _column_names(conn, "strategies")
+    if "failure_reason" not in cols:
+        conn.execute("ALTER TABLE strategies ADD COLUMN failure_reason TEXT DEFAULT ''")
+        log.info("Migrated strategies: added failure_reason")
+    if "failure_verdict" not in cols:
+        conn.execute("ALTER TABLE strategies ADD COLUMN failure_verdict TEXT DEFAULT ''")
+        log.info("Migrated strategies: added failure_verdict")
+
+
 def init_db():
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist, then run migrations."""
     conn = get_db()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS strategies (
@@ -54,7 +72,9 @@ def init_db():
                 CHECK(status IN ('candidate', 'active', 'retired')),
             created_at TEXT NOT NULL,
             promoted_at TEXT,
-            retired_at TEXT
+            retired_at TEXT,
+            failure_reason TEXT DEFAULT '',
+            failure_verdict TEXT DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS backtest_results (
@@ -79,6 +99,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_strategies_regime ON strategies(target_regime);
         CREATE INDEX IF NOT EXISTS idx_backtest_strategy ON backtest_results(strategy_id);
     """)
+    _migrate_failure_columns(conn)
     conn.commit()
     conn.close()
     log.info(f"Registry initialized at {DB_PATH}")
@@ -200,17 +221,25 @@ def promote_strategy(strategy_id: int):
     log.info(f"Promoted strategy_id={strategy_id} to active")
 
 
-def retire_strategy(strategy_id: int, reason: str = ""):
-    """Retire a strategy (demote from active or remove from candidate pool)."""
+def retire_strategy(strategy_id: int, reason: str = "", verdict: str = ""):
+    """Retire a strategy and persist the failure reason + verdict.
+
+    `verdict` is a short code (e.g. FAIL_MINI, FAIL_FULL, FAIL_TOO_FEW,
+    FAIL_SANITY, DEMOTED_POOL, AUTO_RETIRED) used by the generator's
+    failure memory to avoid repeating known-bad approaches.
+    """
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
-        "UPDATE strategies SET status = 'retired', retired_at = ? WHERE id = ?",
-        (now, strategy_id),
+        """UPDATE strategies
+           SET status = 'retired', retired_at = ?,
+               failure_reason = ?, failure_verdict = ?
+           WHERE id = ?""",
+        (now, reason or "", verdict or "", strategy_id),
     )
     conn.commit()
     conn.close()
-    log.info(f"Retired strategy_id={strategy_id}: {reason}")
+    log.info(f"Retired strategy_id={strategy_id} [{verdict}]: {reason}")
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +305,104 @@ def get_all_strategies(status: str = None) -> list:
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_recent_failures(k: int = 8, regime: str | None = None) -> list:
+    """Return the most recently retired candidates with a populated failure_verdict.
+
+    Used by the generator to build a "don't repeat these" section of the prompt.
+    Auto-retires from pool overflow (empty failure_verdict) are excluded.
+
+    Each row is enriched with the strategy's latest backtest metrics (when
+    available) and a short code excerpt, so the LLM sees *why* the strategy
+    failed — not just that it did.
+    """
+    conn = get_db()
+    params: list = []
+    regime_clause = ""
+    if regime and regime != "all":
+        regime_clause = "AND (s.target_regime = ? OR s.target_regime = 'all')"
+        params.append(regime)
+    params.append(k)
+
+    rows = conn.execute(f"""
+        SELECT s.id, s.name, s.thesis, s.target_regime, s.generation_id,
+               s.filepath, s.failure_reason, s.failure_verdict, s.retired_at,
+               br.sharpe, br.profit_total_pct, br.total_trades, br.max_drawdown_pct
+        FROM strategies s
+        LEFT JOIN backtest_results br
+          ON br.id = (SELECT MAX(id) FROM backtest_results WHERE strategy_id = s.id)
+        WHERE s.status = 'retired'
+          AND s.failure_verdict != ''
+          {regime_clause}
+        ORDER BY s.retired_at DESC
+        LIMIT ?
+    """, params).fetchall()
+    conn.close()
+
+    failures = []
+    for row in rows:
+        d = dict(row)
+        d["code_excerpt"] = _extract_entry_logic(d.get("filepath", ""))
+        failures.append(d)
+    return failures
+
+
+def _extract_entry_logic(filepath: str, max_lines: int = 30) -> str:
+    """Pull populate_entry_trend body (roughly) as a compact excerpt."""
+    try:
+        src = Path(filepath).read_text()
+    except Exception:
+        return ""
+    lines = src.splitlines()
+    out: list = []
+    capture = False
+    indent = None
+    for line in lines:
+        if not capture and "def populate_entry_trend" in line:
+            capture = True
+            indent = len(line) - len(line.lstrip())
+            out.append(line.strip())
+            continue
+        if capture:
+            if line.strip() == "":
+                out.append("")
+                continue
+            cur = len(line) - len(line.lstrip())
+            if cur <= indent and line.strip() and not line.lstrip().startswith("#"):
+                break
+            out.append(line.rstrip())
+            if len(out) >= max_lines:
+                out.append("    # ... (truncated)")
+                break
+    return "\n".join(out)
+
+
+def load_recent_reflections(n: int = 2, max_chars: int = 4000) -> str:
+    """Read the latest N reflector markdown files, newest first, concatenated.
+
+    Returns empty string if the reflections dir doesn't exist or has no files.
+    Truncated to max_chars to keep the prompt bounded.
+    """
+    if not REFLECTIONS_DIR.exists():
+        return ""
+    files = sorted(
+        REFLECTIONS_DIR.glob("reflection-*.md"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[:n]
+    if not files:
+        return ""
+    chunks = []
+    for f in files:
+        try:
+            chunks.append(f"--- {f.name} ---\n{f.read_text()}")
+        except Exception as e:
+            log.warning(f"Failed to read reflection {f}: {e}")
+    text = "\n\n".join(chunks)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n\n[...truncated]"
+    return text
 
 
 def get_registry_stats() -> dict:

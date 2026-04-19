@@ -417,8 +417,11 @@ def job_generate_strategies():
 
     try:
         sys.path.insert(0, str(BASE_DIR / "scripts"))
-        from strategy_generator import generate_batch
-        from strategy_registry import register_strategy, get_registry_stats
+        from strategy_generator import generate_batch, _format_failure_examples
+        from strategy_registry import (
+            register_strategy, get_registry_stats,
+            get_recent_failures, load_recent_reflections,
+        )
 
         # Get current regime for context
         state = load_regime_state()
@@ -431,11 +434,22 @@ def job_generate_strategies():
             f"{stats['retired']} retired, {stats['total_backtests']} backtests run."
         )
 
+        # Close the feedback loop: reflector insights + per-regime failure memory
+        reflector_insights = load_recent_reflections(n=2)
+        log.info(f"  Reflector context: {len(reflector_insights)} chars from latest reflections")
+
+        def failures_for(regime: str) -> str:
+            rows = get_recent_failures(k=8, regime=regime)
+            log.info(f"  Failure memory for regime={regime}: {len(rows)} prior failures")
+            return _format_failure_examples(rows)
+
         results = generate_batch(
             count=5,
             regimes=["trending", "ranging", "breakout", "all", "trending"],
             context=context,
             existing_results=existing_results,
+            reflector_insights=reflector_insights,
+            get_failures_for_regime=failures_for,
         )
 
         # Register successful strategies
@@ -513,8 +527,13 @@ def job_backtest_candidates():
                 )
 
                 if not result.get("success"):
-                    log.warning(f"  {name}: backtest failed — {result.get('error', 'unknown')}")
-                    retire_strategy(cand["id"], reason=f"Backtest failed: {result.get('error')}")
+                    err = result.get("error", "unknown")
+                    log.warning(f"  {name}: backtest failed — {err}")
+                    retire_strategy(
+                        cand["id"],
+                        reason=f"Backtest failed: {err}",
+                        verdict="FAIL_BACKTEST",
+                    )
                     continue
 
                 # Record results
@@ -531,8 +550,19 @@ def job_backtest_candidates():
                     promote_strategy(cand["id"])
                     log.info(f"  {name}: AUTO-PROMOTED (profitable, Sharpe > 0)")
                 elif total_trades < 5:
-                    retire_strategy(cand["id"], reason=f"Too few trades: {total_trades}")
+                    retire_strategy(
+                        cand["id"],
+                        reason=f"Too few trades: {total_trades} (profit={profit_pct}%, sharpe={sharpe})",
+                        verdict="FAIL_TOO_FEW",
+                    )
                     log.info(f"  {name}: RETIRED (too few trades)")
+                elif profit_pct <= 0 or sharpe <= 0:
+                    retire_strategy(
+                        cand["id"],
+                        reason=f"Unprofitable: {total_trades} trades, {profit_pct}% profit, sharpe={sharpe}",
+                        verdict="FAIL_UNPROFITABLE",
+                    )
+                    log.info(f"  {name}: RETIRED (unprofitable)")
 
             except Exception as e:
                 log.warning(f"  {name}: error — {e}")

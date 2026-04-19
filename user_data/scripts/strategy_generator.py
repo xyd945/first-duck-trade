@@ -112,18 +112,84 @@ OUTPUT: Return ONLY the Python code. No explanations, no markdown fences, just t
 """
 
 
+def _format_failure_examples(failures: list) -> str:
+    """Render failure rows from registry.get_recent_failures into a compact block."""
+    if not failures:
+        return ""
+    parts = []
+    for i, f in enumerate(failures, 1):
+        thesis = (f.get("thesis") or "").strip() or "(no thesis recorded)"
+        reason = (f.get("failure_reason") or "").strip() or "(no reason recorded)"
+        verdict = f.get("failure_verdict") or "UNKNOWN"
+        regime = f.get("target_regime") or "all"
+        trades = f.get("total_trades")
+        profit = f.get("profit_total_pct")
+        sharpe = f.get("sharpe")
+        metrics = []
+        if trades is not None:
+            metrics.append(f"trades={trades}")
+        if profit is not None:
+            metrics.append(f"profit={profit}%")
+        if sharpe is not None:
+            metrics.append(f"sharpe={sharpe}")
+        metric_str = f" [{', '.join(metrics)}]" if metrics else ""
+        block = (
+            f"#{i} [{verdict}] regime={regime}{metric_str}\n"
+            f"   thesis: {thesis}\n"
+            f"   why it failed: {reason}"
+        )
+        excerpt = (f.get("code_excerpt") or "").strip()
+        if excerpt:
+            block += f"\n   entry logic:\n{_indent(excerpt, 6)}"
+        parts.append(block)
+    return "\n\n".join(parts)
+
+
+def _indent(text: str, n: int) -> str:
+    pad = " " * n
+    return "\n".join(pad + line if line else line for line in text.splitlines())
+
+
 def build_generation_prompt(
     target_regime: str = "all",
     context: str = "",
     existing_results: str = "",
     generation_id: str = "",
+    reflector_insights: str = "",
+    failure_examples: str = "",
 ) -> str:
-    """Build the user prompt for strategy generation."""
+    """Build the user prompt for strategy generation.
+
+    reflector_insights: strategic lessons the reflector agent wrote after
+    reviewing live trades. Pre-rendered markdown from
+    `registry.load_recent_reflections()`.
+
+    failure_examples: pre-rendered block of prior strategies that failed
+    backtest, with their failure reason + entry logic. From
+    `_format_failure_examples(registry.get_recent_failures(...))`.
+    """
 
     prompt = f"""Generate a new Freqtrade trading strategy for SPOT crypto trading (LONG only, no shorting).
 
 TARGET REGIME: {target_regime}
 GENERATION ID: {generation_id}
+
+"""
+
+    if reflector_insights:
+        prompt += f"""LESSONS FROM RECENT REFLECTIONS (trade review agent):
+These are observations from live paper-trading. Apply the takeaways where they fit.
+{reflector_insights}
+
+"""
+
+    if failure_examples:
+        prompt += f"""RECENT FAILURES TO AVOID (do NOT repeat these approaches):
+Each entry is a prior LLM-generated strategy that failed. Learn from the failure mode:
+if a thesis keeps losing money, it's not alpha — try a different setup, indicator family,
+or regime. Do not re-propose anything with a near-identical entry logic.
+
+{failure_examples}
 
 """
 
@@ -183,6 +249,8 @@ def generate_strategy(
     existing_results: str = "",
     model: str = "claude-sonnet-4-20250514",
     max_retries: int = 1,
+    reflector_insights: str = "",
+    failure_examples: str = "",
 ) -> dict:
     """
     Generate a new strategy using Claude API.
@@ -221,6 +289,8 @@ def generate_strategy(
             context=context,
             existing_results=existing_results,
             generation_id=attempt_id,
+            reflector_insights=reflector_insights,
+            failure_examples=failure_examples,
         )
 
         try:
@@ -290,8 +360,16 @@ def generate_batch(
     regimes: list = None,
     context: str = "",
     existing_results: str = "",
+    reflector_insights: str = "",
+    get_failures_for_regime=None,
 ) -> list:
-    """Generate a batch of strategies across different regimes."""
+    """Generate a batch of strategies across different regimes.
+
+    get_failures_for_regime: optional callable(regime: str) -> str
+        Returns a pre-formatted failure_examples block for the given regime.
+        Lets the caller inject per-regime failure memory without re-querying
+        the registry here.
+    """
     if regimes is None:
         regimes = ["trending", "ranging", "breakout", "all"]
 
@@ -299,10 +377,13 @@ def generate_batch(
     for i in range(count):
         regime = regimes[i % len(regimes)]
         log.info(f"=== Generating strategy {i+1}/{count} for regime: {regime} ===")
+        failures = get_failures_for_regime(regime) if get_failures_for_regime else ""
         result = generate_strategy(
             target_regime=regime,
             context=context,
             existing_results=existing_results,
+            reflector_insights=reflector_insights,
+            failure_examples=failures,
         )
         results.append(result)
 
@@ -327,7 +408,43 @@ if __name__ == "__main__":
     parser.add_argument("--regime", default="all", help="Target regime")
     parser.add_argument("--count", type=int, default=1, help="Number of strategies to generate")
     parser.add_argument("--model", default="claude-sonnet-4-20250514", help="Claude model to use")
+    parser.add_argument(
+        "--dry-prompt",
+        action="store_true",
+        help="Print the assembled prompt using real registry data, without calling Claude",
+    )
+    parser.add_argument(
+        "--failure-k", type=int, default=8,
+        help="How many recent failures to inject (for --dry-prompt)",
+    )
     args = parser.parse_args()
+
+    if args.dry_prompt:
+        sys.path.insert(0, str(BASE_DIR / "scripts"))
+        from strategy_registry import get_recent_failures, load_recent_reflections
+
+        failures = get_recent_failures(k=args.failure_k, regime=args.regime)
+        failure_block = _format_failure_examples(failures)
+        reflections = load_recent_reflections(n=2)
+
+        prompt = build_generation_prompt(
+            target_regime=args.regime,
+            context="(dry-run — no live regime state injected)",
+            existing_results="(dry-run — no registry stats injected)",
+            generation_id="dry-run",
+            reflector_insights=reflections,
+            failure_examples=failure_block,
+        )
+        print("=" * 72)
+        print("SYSTEM PROMPT")
+        print("=" * 72)
+        print(SYSTEM_PROMPT)
+        print("=" * 72)
+        print(f"USER PROMPT  (failures injected: {len(failures)}, "
+              f"reflection chars: {len(reflections)})")
+        print("=" * 72)
+        print(prompt)
+        sys.exit(0)
 
     if args.count == 1:
         result = generate_strategy(target_regime=args.regime, model=args.model)
