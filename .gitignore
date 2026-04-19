@@ -33,6 +33,12 @@ user_data/tradesv3*.sqlite
 user_data/tradesv3*.sqlite-shm
 user_data/tradesv3*.sqlite-wal
 
+# LLM-generated strategy candidates (runtime artifacts)
+# Keep the base class and .gitkeep so the dir + import path survive
+user_data/strategies/candidates/*
+!user_data/strategies/candidates/.gitkeep
+!user_data/strategies/candidates/base_generated.py
+
 # Jupyter Notebooks
 .ipynb_checkpoints
 user_data/notebooks/.ipynb_checkpoints
