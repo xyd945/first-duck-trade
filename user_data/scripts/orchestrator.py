@@ -509,7 +509,7 @@ def job_backtest_candidates():
                 result = run_backtest(
                     strategy_name=name,
                     use_sandbox=True,
-                    timeout_seconds=180,
+                    timeout_seconds=600,
                 )
 
                 if not result.get("success"):

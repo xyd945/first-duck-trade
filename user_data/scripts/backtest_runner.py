@@ -171,23 +171,21 @@ def parse_backtest_output(output: str, strategy_name: str, timerange: str = None
 
     import re
 
-    # Total trades
-    result["total_trades"] = extract_value(
-        r"Trades\s*│\s*(\d+)", output, default=0, cast=int
-    ) or extract_value(
-        r"│\s+\d+\s+│", output, default=0, cast=int
-    )
-
     # Try to parse from the STRATEGY SUMMARY line
     # Format: │ StrategyName │ N │ X.XX │ Y.YY USDT │ ...
     summary_pattern = (
-        rf"│\s*{re.escape(strategy_name)}\s*│\s*(\d+)\s*│\s*([-\d.]+)\s*│\s*([-\d.]+)\s*│"
+        rf"│\s*{re.escape(strategy_name)}\s*│\s*(\d+)\s*│\s*([-\d.]+)\s*│\s*([-\d.]+)"
     )
     summary_match = re.search(summary_pattern, output)
     if summary_match:
         result["total_trades"] = int(summary_match.group(1))
         result["profit_avg_pct"] = float(summary_match.group(2))
         result["profit_total_abs"] = float(summary_match.group(3))
+    else:
+        # Fallback: look for total trades in the TOTAL row
+        result["total_trades"] = extract_value(
+            r"│\s*TOTAL\s*│\s*(\d+)\s*│", output, default=0, cast=int
+        )
 
     # Profit
     result["profit_total_pct"] = extract_value(
@@ -212,8 +210,17 @@ def parse_backtest_output(output: str, strategy_name: str, timerange: str = None
         r"Profit factor\s*│\s*([-\d.]+)", output, default=0.0
     )
 
-    # Win rate from summary (Win%)
-    result["win_rate"] = extract_value(r"(\d+\.\d+)\s*│\s*[\d.]+ USDT", output, default=0.0)
+    # Win rate from STRATEGY SUMMARY — last column shows "Win  Draw  Loss  Win%"
+    # Match the Win% value at the end of the strategy summary row
+    win_pattern = rf"{re.escape(strategy_name)}.*?(\d+(?:\.\d+)?)\s*│\s*[\d.]+\s*(?:USDT|%)?\s*│?\s*$"
+    win_match = re.search(win_pattern, output, re.MULTILINE)
+    if win_match:
+        result["win_rate"] = float(win_match.group(1))
+    else:
+        # Fallback: look for "Win%" pattern anywhere
+        result["win_rate"] = extract_value(
+            r"(\d+(?:\.\d+)?)\s*│\s*[\d.]+\s*(?:USDT|%)", output, default=0.0
+        )
 
     # Duration
     duration_match = re.search(r"Avg Duration\s*│\s*(.+?)│", output)
