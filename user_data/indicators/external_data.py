@@ -1,29 +1,29 @@
 """
 External macro data injection for generated strategies.
 
-`add_external_data(dataframe)` is a single entry point that adds five macro
+`add_external_data(dataframe)` is a single entry point that adds macro
 columns to the strategy dataframe:
 
-  - fgi   composite Fear & Greed index (PMACD + RoR + Money Flow + VIX + Gold)
-  - vix   CBOE Volatility Index close (1d, ffilled to strategy timeframe)
-  - gold  Gold futures close
-  - dxy   US Dollar Index close
-  - spx   S&P 500 close
+  - fgi                    composite Fear & Greed (PMACD + RoR + Money Flow + VIX + Gold)
+  - vix                    CBOE Volatility Index close (1d, ffilled to strategy timeframe)
+  - gold                   Gold futures close
+  - dxy                    US Dollar Index close
+  - spx                    S&P 500 close
+  - btc_funding_rate       BTC perpetual funding rate (positioning signal)
+  - btc_oi                 BTC futures open interest in USD
+  - btc_oi_pct_change_24h  1-day % change in OI
 
-All four raw series (vix/gold/dxy/spx) are shifted by 1 day before reindexing
-to the strategy dataframe — daily closes are only known after the day ends, so
-shifting prevents look-ahead bias. Missing data files produce a column of NaN
-rather than an exception; strategies should handle NaN with `.fillna(0)` or
-explicit guards.
-
-The fgi component already lives in fear_and_greed.py; this module reuses its
-loader and adds the raw closes the LLM can build cross-asset conditions from
-(e.g. "enter when vix below 18 and dxy weakening").
+All raw series are shifted forward in time before reindexing to prevent
+look-ahead bias (daily closes need a 1-day shift, 8h funding needs an 8h
+shift, etc.). See each indicator module for the exact offset. Missing data
+files produce columns of NaN rather than exceptions; strategies should
+handle NaN with `.fillna()` or explicit guards.
 """
 
 import pandas as pd
 
 from .fear_and_greed import add_fear_and_greed, load_external_dataframe
+from .perp_metrics import add_perp_metrics
 
 
 def _attach_external_close(
@@ -61,4 +61,5 @@ def add_external_data(dataframe: pd.DataFrame) -> pd.DataFrame:
     _attach_external_close(dataframe, "GOLD/USDT", "gold")
     _attach_external_close(dataframe, "DXY/USDT", "dxy")
     _attach_external_close(dataframe, "SPX/USDT", "spx")
+    dataframe = add_perp_metrics(dataframe)
     return dataframe
