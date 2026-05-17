@@ -16,7 +16,12 @@ WORKDIR /app
 COPY docker/requirements-orchestrator.txt .
 RUN pip install --no-cache-dir -r requirements-orchestrator.txt
 
-COPY user_data/scripts/ /app/scripts/
-COPY user_data/indicators/ /app/indicators/
+# We deliberately do NOT bake user_data/scripts or user_data/indicators into
+# the image — that caused silent drift where the scheduled daemon ran the
+# baked copy while manual invocations from /app/user_data/* ran a different
+# (newer) copy. The bind-mounted ./user_data is the single source of truth.
+# Put /app/user_data on the Python path so `import indicators`, `import scripts`,
+# etc. resolve from the mount.
+ENV PYTHONPATH=/app/user_data
 
-CMD ["python", "scripts/orchestrator.py"]
+CMD ["python", "/app/user_data/scripts/orchestrator.py"]

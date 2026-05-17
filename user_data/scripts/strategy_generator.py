@@ -41,7 +41,8 @@ CRITICAL RULES:
 1. The strategy MUST extend BaseGeneratedStrategy (import with: from base_generated import BaseGeneratedStrategy)
 2. You MUST implement: populate_indicators, populate_entry_trend, populate_exit_trend
 3. You MUST set class attributes: STRATEGY_THESIS, TARGET_REGIME, GENERATION_ID
-4. Only use these imports: freqtrade.strategy, pandas, pandas_ta (as ta), numpy (as np)
+4. Allowed imports: freqtrade.strategy, pandas, pandas_ta (as ta), numpy (as np),
+   and `from indicators.external_data import add_external_data` (see EXTERNAL DATA below).
 5. NO file I/O, NO network calls, NO exec/eval, NO os/sys/subprocess
 6. NO .shift(-N) — that's look-ahead bias (accessing future data)
 7. NO .rolling(center=True) — that's also look-ahead bias
@@ -51,6 +52,26 @@ CRITICAL RULES:
 11. Timeframe is 1h. startup_candle_count should be >= 200.
 12. SPOT TRADING ONLY — LONG entries only. Do NOT set can_short = True. Do NOT generate short signals.
 13. Entry signals use 'enter_long' column. Exit signals use 'exit_long' column.
+14. The FIRST line of populate_indicators MUST be: `dataframe = add_external_data(dataframe)`.
+    This injects macro context the strategy is encouraged (not required) to use.
+
+EXTERNAL DATA (available via add_external_data — already shifted +1 day to avoid look-ahead):
+  dataframe['fgi']    Fear & Greed composite (PMACD + RoR + Money Flow + VIX + Gold).
+                      Negative = Fear (extreme oversold macro), Positive = Greed.
+                      Useful as a contrarian filter (e.g. only long when fgi < -10
+                      = market is fearful = better risk/reward for longs).
+  dataframe['vix']    CBOE Volatility Index daily close. High vix = panic.
+                      Low vix (under ~18) historically favors trend continuation.
+  dataframe['gold']   Gold futures close. Rising gold often means risk-off.
+                      A falling gold + rising spx pair tends to be a risk-on signal.
+  dataframe['dxy']    US Dollar Index. Strong dollar (rising dxy) is generally
+                      a headwind for risk assets including crypto.
+  dataframe['spx']    S&P 500 close. Crypto correlates with US equities most of
+                      the time; spx weakness is often a leading signal for BTC.
+
+These columns are 1d data forward-filled to the strategy's 1h timeframe. They
+may be NaN if the macro feed hasn't run yet — wrap conditions in a NaN guard,
+e.g. `dataframe['vix'].notna() & (dataframe['vix'] < 20)`.
 
 PANDAS_TA COLUMN NAMING — THIS IS CRITICAL, get it right:
 pandas_ta encodes parameters into column names. You MUST use the exact column names.
@@ -93,20 +114,30 @@ Simple indicators (return a single Series, assign directly):
   ta.willr(high, low, close, length=N), ta.mfi(high, low, close, volume, length=N)
 
 CORRECT PATTERN — hardcode indicator params, use hyperopt for thresholds:
-  # In populate_indicators — use LITERAL values:
-  bb = ta.bbands(dataframe['close'], length=20, std=2.0)
-  dataframe['bb_upper'] = bb['BBU_20_2.0']
-  dataframe['bb_lower'] = bb['BBL_20_2.0']
-  dataframe['bb_mid'] = bb['BBM_20_2.0']
-  dataframe['bb_pct'] = bb['BBP_20_2.0']
+  from indicators.external_data import add_external_data  # at top of file
+  ...
 
-  donchian = ta.donchian(dataframe['high'], dataframe['low'], lower_length=20, upper_length=20)
-  dataframe['dc_upper'] = donchian['DCU_20_20']
-  dataframe['dc_lower'] = donchian['DCL_20_20']
+  def populate_indicators(self, dataframe, metadata):
+      # FIRST line — injects fgi, vix, gold, dxy, spx (see EXTERNAL DATA above)
+      dataframe = add_external_data(dataframe)
+
+      # In populate_indicators — use LITERAL values:
+      bb = ta.bbands(dataframe['close'], length=20, std=2.0)
+      dataframe['bb_upper'] = bb['BBU_20_2.0']
+      dataframe['bb_lower'] = bb['BBL_20_2.0']
+      dataframe['bb_mid'] = bb['BBM_20_2.0']
+      dataframe['bb_pct'] = bb['BBP_20_2.0']
+
+      donchian = ta.donchian(dataframe['high'], dataframe['low'], lower_length=20, upper_length=20)
+      dataframe['dc_upper'] = donchian['DCU_20_20']
+      dataframe['dc_lower'] = donchian['DCL_20_20']
+      return dataframe
 
   # In populate_entry_trend — use hyperopt params for THRESHOLDS:
   rsi_oversold = IntParameter(20, 40, default=30, space="buy")
   # ... (dataframe['rsi'] < self.rsi_oversold.value) ...
+  # Macro filter example (encouraged, not required):
+  # ... & (dataframe['fgi'].fillna(0) < -10) & (dataframe['vix'].fillna(20) < 25) ...
 
 OUTPUT: Return ONLY the Python code. No explanations, no markdown fences, just the .py file content.
 """
