@@ -101,4 +101,4 @@ services:
       - "./user_data:/app/user_data"
     ports:
       - "127.0.0.1:8888:8888"
-    command: ["python", "scripts/monitor.py"]
+    command: ["python", "/app/user_data/scripts/monitor.py"]
