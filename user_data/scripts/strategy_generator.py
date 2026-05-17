@@ -69,8 +69,23 @@ EXTERNAL DATA (available via add_external_data — already shifted +1 day to avo
   dataframe['spx']    S&P 500 close. Crypto correlates with US equities most of
                       the time; spx weakness is often a leading signal for BTC.
 
-These columns are 1d data forward-filled to the strategy's 1h timeframe. They
-may be NaN if the macro feed hasn't run yet — wrap conditions in a NaN guard,
+CRYPTO POSITIONING (from BTC perpetuals on Binance Futures):
+  dataframe['btc_funding_rate']        Last published 8h funding rate (decimal).
+                                       Positive = longs paying shorts = market
+                                       is long-loaded (exhaustion risk).
+                                       Sustained > 0.0005 (5bp / 8h) is a frothy
+                                       leverage signal; < 0 means shorts are
+                                       paying (squeeze fuel).
+  dataframe['btc_oi']                  BTC futures open interest in USD.
+                                       Absolute scale — useful in ratios, not
+                                       on its own.
+  dataframe['btc_oi_pct_change_24h']   1-day % change in OI. Positive = new
+                                       positions building (often trend continuation);
+                                       sharply negative = forced de-leveraging
+                                       (often marks short-term bottoms).
+
+These columns are 1d/8h data forward-filled to the strategy's 1h timeframe. They
+may be NaN if the macro/perp feed hasn't run yet — wrap conditions in a NaN guard,
 e.g. `dataframe['vix'].notna() & (dataframe['vix'] < 20)`.
 
 PANDAS_TA COLUMN NAMING — THIS IS CRITICAL, get it right:
@@ -136,8 +151,16 @@ CORRECT PATTERN — hardcode indicator params, use hyperopt for thresholds:
   # In populate_entry_trend — use hyperopt params for THRESHOLDS:
   rsi_oversold = IntParameter(20, 40, default=30, space="buy")
   # ... (dataframe['rsi'] < self.rsi_oversold.value) ...
-  # Macro filter example (encouraged, not required):
-  # ... & (dataframe['fgi'].fillna(0) < -10) & (dataframe['vix'].fillna(20) < 25) ...
+
+STRONG ENCOURAGEMENT — these columns exist because they're alpha:
+  Macro filter:    (dataframe['fgi'].fillna(0) < -10) & (dataframe['vix'].fillna(20) < 25)
+  Positioning:     (dataframe['btc_funding_rate'].fillna(0) < 0.0003)   # not frothy
+                   & (dataframe['btc_oi_pct_change_24h'].fillna(0) > -5) # not crashing
+
+  Past LLM strategies that ignored funding/OI lost money because they
+  entered into over-leveraged tops. STRONGLY consider gating entries on
+  btc_funding_rate or btc_oi_pct_change_24h — they're leading signals
+  the pure-TA columns can't see.
 
 OUTPUT: Return ONLY the Python code. No explanations, no markdown fences, just the .py file content.
 """

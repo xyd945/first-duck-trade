@@ -15,11 +15,13 @@ Usage in strategy:
 from .whale_liquidity import add_whale_liquidity
 from .chaikin_money_flow import add_chaikin_money_flow
 from .fear_and_greed import add_fear_and_greed
+from .perp_metrics import add_perp_metrics
 from .external_data import add_external_data
 
 __all__ = [
     'add_whale_liquidity',
     'add_chaikin_money_flow',
     'add_fear_and_greed',
+    'add_perp_metrics',
     'add_external_data',
 ]
