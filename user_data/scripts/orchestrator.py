@@ -417,9 +417,9 @@ def job_generate_strategies():
 
     try:
         sys.path.insert(0, str(BASE_DIR / "scripts"))
-        from strategy_generator import generate_batch, _format_failure_examples
+        from strategy_generator import generate_batch, _format_failure_examples, dedupe_class_name
         from strategy_registry import (
-            register_strategy, get_registry_stats,
+            register_strategy, get_registry_stats, get_strategy_by_name,
             get_recent_failures, load_recent_reflections,
         )
 
@@ -480,6 +480,13 @@ def job_generate_strategies():
                             break
 
                     if class_name:
+                        # Avoid UNIQUE collision when LLM reuses a class name
+                        # that matches an already-retired strategy.
+                        class_name = dedupe_class_name(
+                            filepath,
+                            class_name,
+                            lambda n: get_strategy_by_name(n) is not None,
+                        )
                         register_strategy(
                             name=class_name,
                             filepath=str(filepath),

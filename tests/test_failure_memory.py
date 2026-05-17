@@ -264,3 +264,98 @@ def test_format_failure_examples_renders_thesis_and_reason():
 def test_format_failure_examples_empty():
     from strategy_generator import _format_failure_examples
     assert _format_failure_examples([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# dedupe_class_name — UNIQUE collision fix
+# ---------------------------------------------------------------------------
+
+def _write_strategy_file(tmp_path, class_name: str):
+    code = f'''from base_generated import BaseGeneratedStrategy
+
+class {class_name}(BaseGeneratedStrategy):
+    STRATEGY_THESIS = "test"
+    TARGET_REGIME = "all"
+    GENERATION_ID = "gen-test"
+'''
+    fp = tmp_path / f"Strategy_{class_name}.py"
+    fp.write_text(code)
+    return fp
+
+
+def test_dedupe_class_name_noop_when_no_collision(tmp_path):
+    from strategy_generator import dedupe_class_name
+
+    fp = _write_strategy_file(tmp_path, "Unique")
+    result = dedupe_class_name(fp, "Unique", name_exists=lambda n: False)
+    assert result == "Unique"
+    assert "class Unique(" in fp.read_text()  # file unchanged
+
+
+def test_dedupe_class_name_renames_on_collision(tmp_path):
+    from strategy_generator import dedupe_class_name
+
+    fp = _write_strategy_file(tmp_path, "Clashing")
+    taken = {"Clashing"}
+    result = dedupe_class_name(fp, "Clashing", name_exists=lambda n: n in taken)
+
+    assert result == "Clashing_v2"
+    src = fp.read_text()
+    assert "class Clashing_v2(" in src
+    assert "class Clashing(" not in src  # original declaration rewritten
+
+
+def test_dedupe_class_name_walks_until_unique(tmp_path):
+    from strategy_generator import dedupe_class_name
+
+    fp = _write_strategy_file(tmp_path, "Taken")
+    taken = {"Taken", "Taken_v2", "Taken_v3"}
+    result = dedupe_class_name(fp, "Taken", name_exists=lambda n: n in taken)
+    assert result == "Taken_v4"
+    assert "class Taken_v4(" in fp.read_text()
+
+
+def test_dedupe_class_name_is_word_bounded(tmp_path):
+    """Renaming 'Foo' must not touch 'FooBar' or 'class FooWrapper'."""
+    from strategy_generator import dedupe_class_name
+
+    code = '''from base_generated import BaseGeneratedStrategy
+
+class Foo(BaseGeneratedStrategy):
+    STRATEGY_THESIS = "FooBar should not match; class FooWrapper either"
+    pass
+
+# class FooBar would be a separate thing — ensure we don't touch comments
+'''
+    fp = tmp_path / "Strategy_Foo.py"
+    fp.write_text(code)
+
+    result = dedupe_class_name(fp, "Foo", name_exists=lambda n: n == "Foo")
+    assert result == "Foo_v2"
+    src = fp.read_text()
+    assert "class Foo_v2(" in src
+    # The string "FooBar" and "FooWrapper" must remain unchanged
+    assert "FooBar" in src
+    assert "FooWrapper" in src
+
+
+def test_dedupe_class_name_raises_when_class_decl_missing(tmp_path):
+    from strategy_generator import dedupe_class_name
+
+    fp = tmp_path / "broken.py"
+    fp.write_text("# no class declaration here\n")
+    # Only the original name collides; suffix is free → dedupe gets through
+    # the rename step and then fails because the class decl isn't in the file.
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        dedupe_class_name(fp, "Missing", name_exists=lambda n: n == "Missing")
+
+
+def test_dedupe_class_name_caps_iterations(tmp_path):
+    """A pathological name_exists callback must not hang — caller fails fast."""
+    from strategy_generator import dedupe_class_name
+
+    fp = _write_strategy_file(tmp_path, "Endless")
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="1000 attempts"):
+        dedupe_class_name(fp, "Endless", name_exists=lambda n: True)

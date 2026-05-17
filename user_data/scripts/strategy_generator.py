@@ -112,6 +112,57 @@ OUTPUT: Return ONLY the Python code. No explanations, no markdown fences, just t
 """
 
 
+def dedupe_class_name(filepath, class_name: str, name_exists) -> str:
+    """If class_name collides with an already-registered strategy, rename the
+    class inside the .py file to a unique variant and return the new name.
+
+    The registry's `name` column is UNIQUE and Freqtrade loads strategies by
+    class name — so a genuine collision means both the DB insert fails AND
+    Freqtrade can't distinguish two classes with the same name. The LLM
+    occasionally regenerates a class name that matches a retired strategy;
+    without this helper that candidate was silently orphaned.
+
+    Args:
+        filepath: Path to the generated .py file.
+        class_name: The class name extracted from the file.
+        name_exists: Callable(name) -> bool. Typically
+            `lambda n: get_strategy_by_name(n) is not None`.
+
+    Returns:
+        A class name guaranteed not to collide in the registry. If renaming
+        was needed, the .py file on disk is rewritten in place.
+    """
+    from pathlib import Path
+
+    if not name_exists(class_name):
+        return class_name
+
+    # Cap iterations defensively: if a pathological name_exists callback
+    # claims every variant is taken, fail loudly instead of hanging.
+    candidate = class_name
+    for i in range(2, 1002):
+        candidate = f"{class_name}_v{i}"
+        if not name_exists(candidate):
+            break
+    else:
+        raise RuntimeError(
+            f"dedupe_class_name: could not find a free variant of {class_name} "
+            f"after 1000 attempts"
+        )
+
+    fp = Path(filepath)
+    source = fp.read_text()
+    pattern = re.compile(rf'\bclass\s+{re.escape(class_name)}\b')
+    new_source, n_replaced = pattern.subn(f"class {candidate}", source, count=1)
+    if n_replaced == 0:
+        raise ValueError(
+            f"dedupe_class_name: could not find 'class {class_name}' in {fp}"
+        )
+    fp.write_text(new_source)
+    log.info(f"Renamed class {class_name} -> {candidate} in {fp.name} (collision)")
+    return candidate
+
+
 def _format_failure_examples(failures: list) -> str:
     """Render failure rows from registry.get_recent_failures into a compact block."""
     if not failures:
