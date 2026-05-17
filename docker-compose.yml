@@ -13,6 +13,10 @@ services:
     container_name: ft-sweep
     volumes:
       - "./user_data:/freqtrade/user_data"
+    environment:
+      # So generated strategies' `from indicators.* import ...` resolves
+      # from the bind-mounted user_data/indicators/ package.
+      - PYTHONPATH=/freqtrade/user_data
     ports:
       - "127.0.0.1:8081:8080"
     command: >
@@ -31,6 +35,8 @@ services:
     container_name: ft-momentum
     volumes:
       - "./user_data:/freqtrade/user_data"
+    environment:
+      - PYTHONPATH=/freqtrade/user_data
     ports:
       - "127.0.0.1:8082:8080"
     command: >
@@ -51,6 +57,8 @@ services:
       - backtest  # Only starts when explicitly requested
     volumes:
       - "./user_data:/freqtrade/user_data"
+    environment:
+      - PYTHONPATH=/freqtrade/user_data
     # Network needed to load exchange markets data during backtesting.
     # LLM-generated strategy code is validated (no network/file I/O calls allowed).
     # Resource limits to prevent runaway generated code
