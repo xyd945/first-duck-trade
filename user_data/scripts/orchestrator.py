@@ -551,6 +551,10 @@ def job_backtest_candidates():
             gate_regime_conditional_floor, gate_beat_buyhold,
             gate_walk_forward, run_walk_forward,
         )
+        from trade_attribution import (
+            build_macro_snapshots, load_trades_from_zip,
+            attribute_trades, summarize_attribution,
+        )
 
         candidates = get_candidates()
         if not candidates:
@@ -577,6 +581,14 @@ def job_backtest_candidates():
         wf_splits = int(os.environ.get("R7_WF_SPLITS", "3"))
         wf_days = int(os.environ.get("R7_WF_DAYS", "60"))
 
+        # R2d: macro snapshot dataframe is the same for every candidate in
+        # this job run — build it once, share across the loop.
+        try:
+            macro_df = build_macro_snapshots()
+        except Exception as e:
+            log.warning(f"  macro snapshot build failed; attribution will be skipped: {e}")
+            macro_df = None
+
         for cand in candidates[:10]:  # Cap at 10 per run to limit compute
             name = cand["name"]
             target_regime = cand.get("target_regime", "all")
@@ -587,6 +599,7 @@ def job_backtest_candidates():
                     strategy_name=name,
                     use_sandbox=True,
                     timeout_seconds=600,
+                    export_trades=True,  # R2d
                 )
 
                 if not result.get("success"):
@@ -599,9 +612,23 @@ def job_backtest_candidates():
                     )
                     continue
 
+                # R2d: per-trade attribution. Best-effort — if anything goes
+                # wrong (missing export, malformed trades, etc.) we log and
+                # carry on with the rest of the pipeline.
+                attribution = None
+                trades_path = result.get("trades_export_path")
+                if trades_path and macro_df is not None and not macro_df.empty:
+                    try:
+                        trades = load_trades_from_zip(trades_path, name)
+                        attribution = attribute_trades(trades, macro_df)
+                        if attribution and attribution["total_trades"] > 0:
+                            log.info(f"  {name} [attribution]\n{summarize_attribution(attribution)}")
+                    except Exception as e:
+                        log.warning(f"  {name}: attribution failed — {e}")
+
                 # Record results before running gates so we always have the
                 # full-backtest row even if a gate later fails.
-                record_backtest(cand["id"], result)
+                record_backtest(cand["id"], result, attribution=attribution)
 
                 total_trades = result.get("total_trades", 0)
                 profit_pct = result.get("profit_total_pct", 0)
