@@ -417,29 +417,22 @@ def generate_strategy(
             filepath.write_text(code)
             log.info(f"Strategy written to: {filepath}")
 
-            # Validate
+            # Validate (mechanical: imports, look-ahead, structure)
             result = validate_strategy_file(filepath)
             log.info(f"Validation: {result}")
 
-            if result.passed:
-                return {
-                    "success": True,
-                    "filepath": filepath,
-                    "validation": result,
-                    "generation_id": attempt_id,
-                }
-
-            # If validation failed and we have retries left, feed error back
-            if attempt < max_retries:
-                log.warning(
-                    f"Validation failed (attempt {attempt}), retrying with error feedback..."
-                )
-                existing_results += (
-                    f"\n\nPREVIOUS ATTEMPT FAILED VALIDATION:\n"
-                    f"{result}\n"
-                    f"Fix these issues in the next attempt."
-                )
-            else:
+            if not result.passed:
+                # Validation failure — feed back and retry (or give up)
+                if attempt < max_retries:
+                    log.warning(
+                        f"Validation failed (attempt {attempt}), retrying with error feedback..."
+                    )
+                    existing_results += (
+                        f"\n\nPREVIOUS ATTEMPT FAILED VALIDATION:\n"
+                        f"{result}\n"
+                        f"Fix these issues in the next attempt."
+                    )
+                    continue
                 return {
                     "success": False,
                     "filepath": filepath,
@@ -447,6 +440,38 @@ def generate_strategy(
                     "generation_id": attempt_id,
                     "error": f"Validation failed after {max_retries + 1} attempts",
                 }
+
+            # Critic pass (judgment review: over-constrained logic, NaN guards,
+            # regime/logic mismatch). Always non-blocking on its own errors.
+            from strategy_critic import critic_review, format_critic_feedback
+            critic = critic_review(code, model=model)
+            verdict = critic.get("verdict", "PASS")
+            log.info(f"Critic verdict: {verdict} — {critic.get('summary', '')}")
+
+            if verdict == "REJECT" and attempt < max_retries:
+                feedback = format_critic_feedback(critic)
+                log.warning(f"Critic REJECTED (attempt {attempt}), retrying with feedback:\n{feedback}")
+                existing_results += (
+                    f"\n\nPREVIOUS ATTEMPT REJECTED BY CRITIC:\n{feedback}\n"
+                    f"Address these issues in the next attempt."
+                )
+                continue
+
+            # PASS, WARN, or REJECT with no retries left — return the strategy.
+            # REJECT-no-retries proceeds anyway: the strategy will likely fail
+            # backtest, which is the next gate. WARN proceeds with note logged.
+            if verdict == "WARN":
+                for issue in critic.get("issues", []):
+                    log.warning(f"  Critic WARN [{issue.get('severity','?')}/{issue.get('category','?')}]: {issue.get('description','')}")
+            elif verdict == "REJECT":
+                log.warning(f"Critic REJECTED but no retries left — proceeding to backtest anyway")
+            return {
+                "success": True,
+                "filepath": filepath,
+                "validation": result,
+                "critic": critic,
+                "generation_id": attempt_id,
+            }
 
         except Exception as e:
             log.error(f"Generation attempt {attempt} failed: {e}")
