@@ -453,6 +453,11 @@ def job_generate_strategies():
             existing_results=existing_results,
             reflector_insights=reflector_insights,
             get_failures_for_regime=failures_for,
+            # R6 — let each candidate iterate up to 2 turns based on its own
+            # mini-backtest result. Single-shot generation was producing too
+            # many 0-trade strategies even with R3+R5 in place.
+            iterative=True,
+            max_turns=2,
         )
 
         # Register successful strategies
