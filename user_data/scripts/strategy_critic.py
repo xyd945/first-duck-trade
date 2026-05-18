@@ -88,37 +88,43 @@ Specific things to flag as HIGH severity:
 You output ONLY the JSON object. No prose, no markdown fences."""
 
 
-def critic_review(code: str, model: str = "claude-sonnet-4-20250514") -> dict:
+def critic_review(
+    code: str,
+    model: str | None = None,
+    provider: str | None = None,
+) -> dict:
     """Run the critic on a strategy source string. Returns the parsed JSON.
+
+    `model` / `provider` are forwarded to llm_client.chat_completion. When None,
+    the env-driven defaults apply (same as the generator).
 
     On any error (no API key, transport failure, malformed response), returns
     a synthetic PASS verdict with `error` set — the generator MUST treat critic
     failures as non-blocking. We never want the critic itself to halt the
     pipeline; its job is to add signal, not gate.
     """
-    try:
-        import anthropic
-    except ImportError:
-        return {"verdict": "PASS", "summary": "critic skipped (anthropic SDK missing)", "issues": [], "error": "anthropic_not_installed"}
+    # Lazy import — keeps llm_client out of test paths that fully mock the
+    # critic. Importing here also ensures we pick up monkeypatched modules.
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from llm_client import chat_completion
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return {"verdict": "PASS", "summary": "critic skipped (no API key)", "issues": [], "error": "missing_api_key"}
-
-    client = anthropic.Anthropic(api_key=api_key)
     user_prompt = f"Review this Freqtrade strategy:\n\n```python\n{code}\n```"
 
     try:
-        response = client.messages.create(
+        text = chat_completion(
+            messages=[{"role": "user", "content": user_prompt}],
+            system=CRITIC_SYSTEM_PROMPT,
             model=model,
             max_tokens=1024,
-            system=CRITIC_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
+            provider=provider,
         )
-        text = response.content[0].text
     except Exception as e:
         log.warning(f"Critic API call failed: {e}")
-        return {"verdict": "PASS", "summary": f"critic skipped (api error: {e})", "issues": [], "error": str(e)}
+        return {"verdict": "PASS",
+                "summary": f"critic skipped (api error: {e})",
+                "issues": [], "error": str(e)}
 
     return _parse_verdict_json(text)
 

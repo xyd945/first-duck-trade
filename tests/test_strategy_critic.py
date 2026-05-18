@@ -90,48 +90,58 @@ def test_parse_handles_unbalanced_braces():
 
 
 # ---------------------------------------------------------------------------
-# critic_review — mocked Anthropic client
+# critic_review — mocked llm_client wrapper
 # ---------------------------------------------------------------------------
 
 def test_critic_review_returns_pass_when_no_api_key(monkeypatch):
+    """When both provider keys are missing, llm_client raises and the
+    critic catches it as a non-blocking PASS."""
     from strategy_critic import critic_review
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     out = critic_review("class Foo: pass")
     assert out["verdict"] == "PASS"
-    assert out["error"] == "missing_api_key"
+    # The exact error text comes from llm_client (mentions the missing env var)
+    assert "API_KEY" in out["error"]
 
 
 def test_critic_review_returns_pass_on_api_exception(monkeypatch):
+    """LLM transport failure must not block the pipeline."""
     from strategy_critic import critic_review
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
 
-    fake_anthropic = MagicMock()
-    fake_client = MagicMock()
-    fake_client.messages.create.side_effect = Exception("network down")
-    fake_anthropic.Anthropic.return_value = fake_client
-
-    with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+    with patch("llm_client.chat_completion", side_effect=Exception("network down")):
         out = critic_review("class Foo: pass")
     assert out["verdict"] == "PASS"
     assert "network down" in out["error"]
 
 
 def test_critic_review_parses_real_response(monkeypatch):
+    """Happy path: wrapper returns the model's text, critic parses JSON."""
     from strategy_critic import critic_review
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
 
-    fake_msg = MagicMock()
-    fake_msg.content = [MagicMock(text=REJECT_JSON)]
-
-    fake_anthropic = MagicMock()
-    fake_client = MagicMock()
-    fake_client.messages.create.return_value = fake_msg
-    fake_anthropic.Anthropic.return_value = fake_client
-
-    with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+    with patch("llm_client.chat_completion", return_value=REJECT_JSON):
         out = critic_review("class Foo: pass")
     assert out["verdict"] == "REJECT"
     assert len(out["issues"]) == 2
+
+
+def test_critic_review_forwards_provider_override(monkeypatch):
+    """provider=... should reach the wrapper, not get silently dropped."""
+    from strategy_critic import critic_review
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+
+    seen = {}
+    def capture(**kwargs):
+        seen.update(kwargs)
+        return REJECT_JSON
+
+    with patch("llm_client.chat_completion", side_effect=capture):
+        critic_review("class Foo: pass", provider="anthropic", model="claude-test")
+    assert seen["provider"] == "anthropic"
+    assert seen["model"] == "claude-test"
 
 
 # ---------------------------------------------------------------------------

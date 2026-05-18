@@ -418,9 +418,10 @@ def job_generate_strategies():
     """
     log.info("=== Job: Generate strategies ===")
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        log.warning("ANTHROPIC_API_KEY not set. Skipping strategy generation.")
+    if not (os.environ.get("DEEPSEEK_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")):
+        log.warning("No LLM API key set (DEEPSEEK_API_KEY or ANTHROPIC_API_KEY). "
+                    "Skipping strategy generation.")
         return
 
     try:
@@ -847,13 +848,17 @@ def job_reflector():
     """
     log.info("=== Job: Reflector agent ===")
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        log.warning("ANTHROPIC_API_KEY not set. Skipping reflector.")
-        return
-
     try:
-        import anthropic
+        # llm_client handles provider selection + API key check. We still
+        # gate on at least ONE provider being configured so we don't burn
+        # the rest of this job on a definite failure.
+        if not (os.environ.get("DEEPSEEK_API_KEY")
+                or os.environ.get("ANTHROPIC_API_KEY")):
+            log.warning("No LLM API key set (DEEPSEEK_API_KEY or ANTHROPIC_API_KEY). Skipping reflector.")
+            return
+
+        sys.path.insert(0, str(BASE_DIR / "scripts"))
+        from llm_client import chat_completion
 
         # Collect trade data from all instances
         trade_summary = []
@@ -923,14 +928,12 @@ Provide:
 Be specific. Reference actual numbers from the data above. The attribution
 section is the strongest signal you have — use it."""
 
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
+        # The reflector is a small, summarization-style task — provider
+        # default model is fine. Falls back automatically if primary fails.
+        reflection = chat_completion(
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=1024,
         )
-
-        reflection = response.content[0].text
 
         # Save reflection to file
         reflections_dir = BASE_DIR / "data" / "reflections"
@@ -954,13 +957,14 @@ def job_llm_regime_override():
     """
     log.info("=== Job: LLM regime override ===")
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        log.info("ANTHROPIC_API_KEY not set. Using indicator-only regime.")
+    if not (os.environ.get("DEEPSEEK_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")):
+        log.info("No LLM API key set. Using indicator-only regime.")
         return
 
     try:
-        import anthropic
+        sys.path.insert(0, str(BASE_DIR / "scripts"))
+        from llm_client import chat_completion
 
         state = load_regime_state()
         indicator_regime = state.get("regime", "ranging")
@@ -998,14 +1002,10 @@ REGIME: <regime> CONFIDENCE: <0.0-1.0> REASON: <one sentence>
 
 Only override if you have strong reason. The indicator regime is usually correct."""
 
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=100,
+        text = chat_completion(
             messages=[{"role": "user", "content": prompt}],
-        )
-
-        text = response.content[0].text.strip()
+            max_tokens=100,
+        ).strip()
         log.info(f"LLM regime response: {text}")
 
         # Parse response
