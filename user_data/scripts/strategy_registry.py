@@ -57,6 +57,17 @@ def _migrate_failure_columns(conn: sqlite3.Connection):
         log.info("Migrated strategies: added failure_verdict")
 
 
+def _migrate_attribution_column(conn: sqlite3.Connection):
+    """R2d: add attribution_json column to backtest_results for per-trade
+    macro-bucket attribution. Stored as JSON text for forward-compatibility."""
+    cols = _column_names(conn, "backtest_results")
+    if "attribution_json" not in cols:
+        conn.execute(
+            "ALTER TABLE backtest_results ADD COLUMN attribution_json TEXT DEFAULT ''"
+        )
+        log.info("Migrated backtest_results: added attribution_json")
+
+
 def init_db():
     """Create tables if they don't exist, then run migrations."""
     conn = get_db()
@@ -100,6 +111,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_backtest_strategy ON backtest_results(strategy_id);
     """)
     _migrate_failure_columns(conn)
+    _migrate_attribution_column(conn)
     conn.commit()
     conn.close()
     log.info(f"Registry initialized at {DB_PATH}")
@@ -150,16 +162,24 @@ def register_strategy(
     return strategy_id
 
 
-def record_backtest(strategy_id: int, results: dict):
-    """Record backtest results for a strategy."""
+def record_backtest(strategy_id: int, results: dict, attribution: dict | None = None):
+    """Record backtest results for a strategy.
+
+    `attribution` is the R2d per-trade macro-bucket attribution dict
+    (see trade_attribution.attribute_trades). Stored as JSON text;
+    None or {} is persisted as an empty string for backwards compat.
+    """
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
+
+    attribution_json = json.dumps(attribution) if attribution else ""
 
     conn.execute(
         """INSERT INTO backtest_results (strategy_id, timerange, sharpe, sortino,
            max_drawdown_pct, max_drawdown_abs, profit_total_pct, profit_total_abs,
-           profit_factor, total_trades, win_rate, backtest_days, avg_duration, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           profit_factor, total_trades, win_rate, backtest_days, avg_duration,
+           attribution_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             strategy_id,
             results.get("timerange", ""),
@@ -174,6 +194,7 @@ def record_backtest(strategy_id: int, results: dict):
             results.get("win_rate", 0),
             results.get("backtest_days", 0),
             results.get("avg_duration", ""),
+            attribution_json,
             now,
         ),
     )
@@ -181,7 +202,9 @@ def record_backtest(strategy_id: int, results: dict):
     conn.close()
     log.info(f"Recorded backtest for strategy_id={strategy_id}: "
              f"Sharpe={results.get('sharpe', 0)}, "
-             f"Profit={results.get('profit_total_pct', 0)}%")
+             f"Profit={results.get('profit_total_pct', 0)}%"
+             + (f", attribution buckets={len(attribution.get('buckets', {}))}"
+                if attribution else ""))
 
 
 def promote_strategy(strategy_id: int):

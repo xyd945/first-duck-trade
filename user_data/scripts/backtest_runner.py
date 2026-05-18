@@ -39,6 +39,7 @@ def run_backtest(
     config_path: str = None,
     use_sandbox: bool = True,
     timeout_seconds: int = 300,
+    export_trades: bool = False,
 ) -> dict:
     """
     Run a Freqtrade backtest via Docker and return parsed results.
@@ -58,6 +59,10 @@ def run_backtest(
         If True, use the sandboxed container (no network, resource limits).
     timeout_seconds : int
         Max time for the backtest to complete.
+    export_trades : bool
+        If True, write the per-trade list to a deterministic path inside
+        user_data/backtest_results/ and return its host path under
+        result['trades_export_path']. Used by R2d trade attribution.
 
     Returns
     -------
@@ -78,6 +83,7 @@ def run_backtest(
         - backtest_days: int
         - starting_balance: float
         - raw_output: str (last 50 lines)
+        - trades_export_path: str (host path to .zip; only if export_trades=True)
         - error: str (if failed)
     """
     if config_path is None:
@@ -107,8 +113,26 @@ def run_backtest(
         "--strategy-path", "/freqtrade/user_data/strategies/candidates",
         "--timeframe", timeframe,
         "--config", config_path,
-        "--export", "none",  # Don't export trade details to save disk
     ])
+
+    # R2d: per-trade attribution needs Freqtrade's trade export. Recent
+    # Freqtrade deprecated --export-filename — we now pass an isolated
+    # per-call subdirectory via --backtest-directory and let FT auto-name
+    # the file inside it. Avoids collisions between concurrent backtests
+    # and lets us locate the .zip without ambiguity afterwards.
+    export_host_dir: Path | None = None
+    if export_trades:
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        subdir_name = f"{strategy_name}-{run_id}"
+        export_host_dir = BASE_DIR / "backtest_results" / subdir_name
+        export_host_dir.mkdir(parents=True, exist_ok=True)
+        export_container_dir = f"/freqtrade/user_data/backtest_results/{subdir_name}"
+        cmd.extend([
+            "--export", "trades",
+            "--backtest-directory", export_container_dir,
+        ])
+    else:
+        cmd.extend(["--export", "none"])
 
     if timerange:
         cmd.extend(["--timerange", timerange])
@@ -136,7 +160,16 @@ def run_backtest(
             }
 
         # Parse results from output
-        return parse_backtest_output(output, strategy_name, timerange)
+        result = parse_backtest_output(output, strategy_name, timerange)
+        if export_host_dir is not None:
+            # Auto-named file in our per-call subdir. There should be exactly
+            # one .zip; if Freqtrade ever writes multiple, take the newest.
+            zips = sorted(export_host_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime)
+            if zips:
+                result["trades_export_path"] = str(zips[-1])
+            else:
+                log.warning(f"export requested but no zip in {export_host_dir}")
+        return result
 
     except subprocess.TimeoutExpired:
         return {
