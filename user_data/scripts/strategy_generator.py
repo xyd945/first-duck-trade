@@ -84,6 +84,23 @@ CRYPTO POSITIONING (from BTC perpetuals on Binance Futures):
                                        sharply negative = forced de-leveraging
                                        (often marks short-term bottoms).
 
+ALT STRENGTH / BTC DOMINANCE PROXY (ETH/BTC ratio from Binance spot daily):
+  dataframe['eth_btc_ratio']           ETH/USDT ÷ BTC/USDT. Rising = alts
+                                       outperforming BTC = BTC dominance
+                                       falling. Falling = capital flight INTO
+                                       BTC = BTC dominance rising.
+  dataframe['eth_btc_change_7d']       7-day % change in the ratio. Captures
+                                       the alt-strength momentum without the
+                                       noise of a daily diff.
+  dataframe['alt_strength_zscore_30d'] z-score of eth_btc_ratio over 30 days.
+                                       > +1.5 = alt-season extreme; < -1.5 =
+                                       capitulation into BTC (crisis-adjacent).
+                                       Use as a regime filter: BTC-following
+                                       strategies often work best when alts
+                                       are weak (z < 0); reversion / breakout
+                                       BTC plays often coincide with extreme
+                                       capital flows in either direction.
+
 These columns are 1d/8h data forward-filled to the strategy's 1h timeframe. They
 may be NaN if the macro/perp feed hasn't run yet — wrap conditions in a NaN guard,
 e.g. `dataframe['vix'].notna() & (dataframe['vix'] < 20)`.
@@ -161,6 +178,11 @@ STRONG ENCOURAGEMENT — these columns exist because they're alpha:
   entered into over-leveraged tops. STRONGLY consider gating entries on
   btc_funding_rate or btc_oi_pct_change_24h — they're leading signals
   the pure-TA columns can't see.
+
+  Alt-strength regime: (dataframe['alt_strength_zscore_30d'].fillna(0) < 0.5)
+    means BTC is taking share from alts — a useful environment for
+    BTC trend strategies. Conversely, |zscore| > 1.5 marks regime extremes
+    where mean reversion of the ratio itself often follows.
 
 OUTPUT: Return ONLY the Python code. No explanations, no markdown fences, just the .py file content.
 """

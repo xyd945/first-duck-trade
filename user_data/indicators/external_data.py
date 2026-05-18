@@ -12,6 +12,9 @@ columns to the strategy dataframe:
   - btc_funding_rate       BTC perpetual funding rate (positioning signal)
   - btc_oi                 BTC futures open interest in USD
   - btc_oi_pct_change_24h  1-day % change in OI
+  - eth_btc_ratio          ETH/BTC price ratio (BTC dominance proxy)
+  - eth_btc_change_7d      7-day % change in ETH/BTC (alt momentum)
+  - alt_strength_zscore_30d  30d rolling z-score of ETH/BTC (regime signal)
 
 All raw series are shifted forward in time before reindexing to prevent
 look-ahead bias (daily closes need a 1-day shift, 8h funding needs an 8h
@@ -22,6 +25,7 @@ handle NaN with `.fillna()` or explicit guards.
 
 import pandas as pd
 
+from .alt_strength import add_alt_strength
 from .fear_and_greed import add_fear_and_greed, load_external_dataframe
 from .perp_metrics import add_perp_metrics
 
@@ -62,4 +66,5 @@ def add_external_data(dataframe: pd.DataFrame) -> pd.DataFrame:
     _attach_external_close(dataframe, "DXY/USDT", "dxy")
     _attach_external_close(dataframe, "SPX/USDT", "spx")
     dataframe = add_perp_metrics(dataframe)
+    dataframe = add_alt_strength(dataframe)
     return dataframe
