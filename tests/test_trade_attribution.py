@@ -17,6 +17,7 @@ from trade_attribution import (
     load_trades_from_zip,
     attribute_trades,
     summarize_attribution,
+    format_attributions_for_reflector,
 )
 
 
@@ -272,6 +273,80 @@ def test_attribute_trades_skips_trade_with_no_prior_macro():
 def test_summarize_empty():
     out = summarize_attribution({"total_trades": 0})
     assert "No trades" in out
+
+
+def _make_attribution_row(name, regime, status, total, wr, pos, neg, buckets):
+    """Helper for format-attributions tests — builds the shape returned by
+    strategy_registry.get_recent_attributions."""
+    return {
+        "name": name,
+        "target_regime": regime,
+        "status": status,
+        "total_trades": total,
+        "profit_total_pct": 1.5,
+        "sharpe": 0.5,
+        "attribution": {
+            "total_trades": total,
+            "overall_win_rate": wr,
+            "buckets": buckets,
+            "top_positive_lift": pos,
+            "top_negative_lift": neg,
+        },
+    }
+
+
+def test_format_attributions_empty_returns_empty_string():
+    assert format_attributions_for_reflector([]) == ""
+
+
+def test_format_attributions_renders_each_strategy():
+    rows = [
+        _make_attribution_row(
+            "StratA", "trending", "candidate", 50, 0.60,
+            ["fgi_fear"], ["vix_high"],
+            {"fgi_fear": {"trades": 12, "wins": 9, "win_rate": 0.75, "lift": 0.15},
+             "vix_high": {"trades": 10, "wins": 3, "win_rate": 0.30, "lift": -0.30}},
+        ),
+        _make_attribution_row(
+            "StratB", "ranging", "active", 30, 0.50,
+            ["btc_funding_rate_shorts_pay"], [],
+            {"btc_funding_rate_shorts_pay": {"trades": 8, "wins": 6, "win_rate": 0.75, "lift": 0.25}},
+        ),
+    ]
+    out = format_attributions_for_reflector(rows)
+    assert "StratA" in out
+    assert "StratB" in out
+    assert "trending" in out
+    assert "ranging" in out
+    assert "fgi_fear" in out
+    assert "vix_high" in out
+    assert "btc_funding_rate_shorts_pay" in out
+    # Lift formatting includes sign
+    assert "+0.15" in out
+    assert "-0.30" in out
+
+
+def test_format_attributions_handles_strategy_with_no_eligible_buckets():
+    rows = [
+        _make_attribution_row("LowSample", "all", "candidate", 4, 0.25, [], [], {}),
+    ]
+    out = format_attributions_for_reflector(rows)
+    assert "LowSample" in out
+    assert "no buckets" in out.lower()
+
+
+def test_format_attributions_respects_max_chars():
+    # Build many rows so the output overflows
+    rows = []
+    for i in range(50):
+        rows.append(_make_attribution_row(
+            f"Strat{i}", "all", "candidate", 20, 0.5,
+            ["fgi_fear"], [],
+            {"fgi_fear": {"trades": 10, "wins": 6, "win_rate": 0.6, "lift": 0.1}},
+        ))
+    out = format_attributions_for_reflector(rows, max_chars=500)
+    assert len(out) <= 500 + len("\n[...truncated]")
+    assert "[...truncated]" in out
 
 
 def test_summarize_renders_top_buckets():

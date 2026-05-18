@@ -397,6 +397,40 @@ def get_all_strategies(status: str = None) -> list:
     return [dict(r) for r in rows]
 
 
+def get_recent_attributions(n: int = 10, min_trades: int = 10) -> list:
+    """Return the N most recent backtest rows that have stored attribution
+    data and at least `min_trades` trades (so noise from 2-trade backtests
+    doesn't pollute the reflector prompt).
+
+    Each row carries the parsed attribution dict under the 'attribution' key.
+    Rows whose attribution_json can't be parsed are silently skipped — the
+    reflector should never be blocked by one bad row.
+    """
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT s.name, s.target_regime, s.status, s.thesis,
+               br.total_trades, br.profit_total_pct, br.sharpe,
+               br.attribution_json, br.created_at
+        FROM backtest_results br
+        JOIN strategies s ON s.id = br.strategy_id
+        WHERE br.attribution_json != ''
+          AND br.total_trades >= ?
+        ORDER BY br.created_at DESC
+        LIMIT ?
+    """, (min_trades, n)).fetchall()
+    conn.close()
+
+    results = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["attribution"] = json.loads(d["attribution_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        results.append(d)
+    return results
+
+
 def get_recent_failures(k: int = 8, regime: str | None = None) -> list:
     """Return the most recently retired candidates with a populated failure_verdict.
 

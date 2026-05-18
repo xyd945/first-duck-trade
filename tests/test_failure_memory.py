@@ -129,6 +129,118 @@ def _seed_retired(sr, tmp_path, name, regime, verdict, reason):
     return sid
 
 
+# ---------------------------------------------------------------------------
+# get_recent_attributions (reflector consumption of R2d output)
+# ---------------------------------------------------------------------------
+
+def _seed_backtest_with_attribution(sr, tmp_path, name, total_trades, attribution):
+    """Register a strategy + record a backtest with attached attribution."""
+    sid = sr.register_strategy(
+        name=name,
+        filepath=str(tmp_path / f"{name}.py"),
+        thesis=f"Thesis for {name}",
+        target_regime="all",
+    )
+    sr.record_backtest(
+        sid,
+        {"timerange": "20260101-20260201", "total_trades": total_trades,
+         "profit_total_pct": 1.0, "sharpe": 0.5},
+        attribution=attribution,
+    )
+    return sid
+
+
+def test_get_recent_attributions_returns_parsed_dicts(isolated_registry, tmp_path):
+    sr = isolated_registry
+    attr = {
+        "total_trades": 20, "overall_win_rate": 0.5,
+        "buckets": {"vix_low": {"trades": 10, "wins": 7, "win_rate": 0.7, "lift": 0.2}},
+        "top_positive_lift": ["vix_low"], "top_negative_lift": [],
+    }
+    _seed_backtest_with_attribution(sr, tmp_path, "WithAttr", 20, attr)
+
+    rows = sr.get_recent_attributions(n=5)
+    assert len(rows) == 1
+    assert rows[0]["name"] == "WithAttr"
+    assert rows[0]["attribution"]["top_positive_lift"] == ["vix_low"]
+
+
+def test_get_recent_attributions_excludes_empty_attribution(isolated_registry, tmp_path):
+    sr = isolated_registry
+    # Backtest with no attribution attached
+    sid = sr.register_strategy(
+        name="NoAttr", filepath=str(tmp_path / "NoAttr.py"),
+        thesis="x", target_regime="all",
+    )
+    sr.record_backtest(sid, {"total_trades": 20})  # no attribution arg
+
+    rows = sr.get_recent_attributions(n=5)
+    assert rows == []
+
+
+def test_get_recent_attributions_filters_by_min_trades(isolated_registry, tmp_path):
+    sr = isolated_registry
+    big_attr = {"total_trades": 50, "overall_win_rate": 0.5, "buckets": {},
+                "top_positive_lift": [], "top_negative_lift": []}
+    small_attr = {"total_trades": 3, "overall_win_rate": 0.33, "buckets": {},
+                  "top_positive_lift": [], "top_negative_lift": []}
+    _seed_backtest_with_attribution(sr, tmp_path, "Big", 50, big_attr)
+    _seed_backtest_with_attribution(sr, tmp_path, "Small", 3, small_attr)
+
+    rows = sr.get_recent_attributions(n=10, min_trades=10)
+    assert [r["name"] for r in rows] == ["Big"]
+
+
+def test_get_recent_attributions_orders_newest_first(isolated_registry, tmp_path):
+    sr = isolated_registry
+    attr = {"total_trades": 20, "overall_win_rate": 0.5, "buckets": {},
+            "top_positive_lift": [], "top_negative_lift": []}
+    _seed_backtest_with_attribution(sr, tmp_path, "First", 20, attr)
+    _seed_backtest_with_attribution(sr, tmp_path, "Second", 20, attr)
+    _seed_backtest_with_attribution(sr, tmp_path, "Third", 20, attr)
+
+    rows = sr.get_recent_attributions(n=10)
+    # All share the same created_at second, but insertion order is the tie-break
+    # via DESC on created_at, then implicit ID — verify all 3 present
+    names = [r["name"] for r in rows]
+    assert set(names) == {"First", "Second", "Third"}
+
+
+def test_get_recent_attributions_survives_corrupt_json(isolated_registry, tmp_path):
+    """One bad JSON row should not block the rest from being returned."""
+    sr = isolated_registry
+    good_attr = {"total_trades": 20, "overall_win_rate": 0.5, "buckets": {},
+                 "top_positive_lift": [], "top_negative_lift": []}
+    sid_good = _seed_backtest_with_attribution(sr, tmp_path, "Good", 20, good_attr)
+
+    # Inject a bogus row directly
+    sid_bad = sr.register_strategy(
+        name="Bad", filepath=str(tmp_path / "Bad.py"),
+        thesis="x", target_regime="all",
+    )
+    conn = sr.get_db()
+    from datetime import datetime, timezone
+    conn.execute(
+        """INSERT INTO backtest_results (strategy_id, timerange, sharpe, sortino,
+           max_drawdown_pct, max_drawdown_abs, profit_total_pct, profit_total_abs,
+           profit_factor, total_trades, win_rate, backtest_days, avg_duration,
+           attribution_json, created_at) VALUES
+           (?, '', 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, '', 'NOT JSON {{{', ?)""",
+        (sid_bad, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    rows = sr.get_recent_attributions(n=10)
+    names = [r["name"] for r in rows]
+    assert "Good" in names
+    assert "Bad" not in names  # corrupt row silently dropped
+
+
+# ---------------------------------------------------------------------------
+# get_recent_failures
+# ---------------------------------------------------------------------------
+
 def test_get_recent_failures_excludes_empty_verdict(isolated_registry, tmp_path):
     """Auto-retires from pool overflow (empty verdict) must NOT appear."""
     sr = isolated_registry

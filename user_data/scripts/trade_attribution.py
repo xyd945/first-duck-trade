@@ -233,6 +233,64 @@ def attribute_trades(
     }
 
 
+def format_attributions_for_reflector(
+    attributions: list[dict],
+    max_chars: int = 2500,
+) -> str:
+    """Render multiple strategies' attribution as a compact reflector-prompt
+    section.
+
+    Each input row is a `get_recent_attributions` dict (name, target_regime,
+    status, total_trades, attribution=...). Output is a per-strategy summary
+    showing top-positive and top-negative lift buckets. The reflector LLM
+    sees this and can reason about cross-strategy patterns ("3 of the last
+    4 momentum strategies win in fgi_fear — generate more contrarian
+    momentum filters next round").
+
+    Returns "" when given an empty list so callers can unconditionally drop
+    the section into the prompt.
+    """
+    if not attributions:
+        return ""
+
+    header = (
+        f"PER-STRATEGY MACRO ATTRIBUTION (last {len(attributions)} backtests with"
+        f" sufficient sample size).\n"
+        "Each strategy shows which macro buckets at trade-entry time correlated\n"
+        "with wins vs losses. 'lift +0.10' = bucket win-rate is 10 percentage\n"
+        "points above the strategy's overall win-rate. Use this to spot which\n"
+        "macro filters work or don't across the pool.\n"
+    )
+
+    lines = [header]
+    for d in attributions:
+        attr = d.get("attribution", {})
+        buckets = attr.get("buckets", {})
+        pos = attr.get("top_positive_lift", [])
+        neg = attr.get("top_negative_lift", [])
+        wr = attr.get("overall_win_rate", 0)
+        tot = attr.get("total_trades", 0)
+
+        lines.append(
+            f"\n{d['name']} (regime={d.get('target_regime', '?')}, "
+            f"status={d.get('status', '?')}, {tot} trades, "
+            f"{wr:.0%} WR, profit={d.get('profit_total_pct', 0):.2f}%):"
+        )
+        if pos:
+            wins = ", ".join(f"{b} {buckets[b]['lift']:+.2f}" for b in pos)
+            lines.append(f"  Wins favored when: {wins}")
+        if neg:
+            losses = ", ".join(f"{b} {buckets[b]['lift']:+.2f}" for b in neg)
+            lines.append(f"  Losses favored when: {losses}")
+        if not pos and not neg:
+            lines.append("  (no buckets cleared the sample-size threshold)")
+
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n[...truncated]"
+    return text
+
+
 def summarize_attribution(attr: dict) -> str:
     """Human-readable rendering for logs and the reflector prompt."""
     total = attr.get("total_trades", 0)

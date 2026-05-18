@@ -829,11 +829,17 @@ def job_reflector():
         regime_state = load_regime_state()
         risk_state = load_risk_state()
 
-        # Get registry stats
+        # Get registry stats + recent attribution evidence
         sys.path.insert(0, str(BASE_DIR / "scripts"))
-        from strategy_registry import get_registry_stats, get_active_strategies
+        from strategy_registry import (
+            get_registry_stats, get_active_strategies, get_recent_attributions,
+        )
+        from trade_attribution import format_attributions_for_reflector
         stats = get_registry_stats()
         active = get_active_strategies()
+        attributions = get_recent_attributions(n=10, min_trades=10)
+        attribution_section = format_attributions_for_reflector(attributions)
+        log.info(f"  Reflector context: {len(attributions)} strategies with attribution")
 
         # Build prompt
         prompt = f"""You are a trading system reflector. Review the following weekly trading data
@@ -848,16 +854,24 @@ INSTANCE PERFORMANCE:
 REGISTRY STATS: {json.dumps(stats)}
 ACTIVE STRATEGIES: {json.dumps([s['name'] for s in active])}
 
+{attribution_section}
+
 Provide:
 1. PERFORMANCE SUMMARY: One paragraph on how the system performed this week.
 2. REGIME ACCURACY: Was the regime classification correct? Did strategies match?
-3. RECOMMENDATIONS: 2-3 specific, actionable suggestions. Examples:
+3. ATTRIBUTION PATTERNS: From the per-strategy attribution above, what macro
+   conditions consistently favor wins or losses across the pool? Call out
+   buckets that appear in 2+ strategies' top-lift lists — those are the most
+   reliable signals for the next round of strategy generation.
+4. RECOMMENDATIONS: 2-3 specific, actionable suggestions. Examples:
    - "Generate more ranging strategies — current ranging strategy underperforms"
    - "Tighten stoploss on momentum strategy — large drawdowns on trend reversals"
-   - "Current regime thresholds may be too sensitive — 3 regime changes this week"
-4. RISK FLAGS: Any concerns about drawdown, exposure, or system health.
+   - "Add fgi_fear macro_confidence filter to next batch — 3/4 strategies show
+     +0.05 to +0.10 lift in that bucket"
+5. RISK FLAGS: Any concerns about drawdown, exposure, or system health.
 
-Be specific. Reference actual numbers from the data above."""
+Be specific. Reference actual numbers from the data above. The attribution
+section is the strongest signal you have — use it."""
 
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
