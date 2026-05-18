@@ -581,6 +581,88 @@ def job_backtest_candidates():
         log.error(f"Candidate backtesting failed: {e}", exc_info=True)
 
 
+def job_hyperopt_candidates():
+    """Weekly (after backtest): try to rescue marginal failures with hyperopt.
+
+    Picks up the top-N most-promising recently-retired candidates
+    (FAIL_TOO_FEW or FAIL_UNPROFITABLE only — crashes are skipped) and runs
+    Freqtrade's hyperopt to search the param space the LLM already declared
+    via IntParameter/DecimalParameter. Hyperopt auto-writes
+    <StrategyFile>.json next to the .py file with the winning params, so the
+    re-backtest below picks them up transparently.
+
+    Outcomes:
+      HYPEROPT_PROMOTE   re-backtest met PROMOTE criteria → status='active'
+      HYPEROPT_NO_EDGE   hyperopt ran but re-backtest still failed → stays retired
+                         (failure_verdict updated so we don't retry forever)
+      HYPEROPT_FAILED    hyperopt subprocess itself errored (timeout, OOM, etc.)
+    """
+    log.info("=== Job: Hyperopt rescue ===")
+    try:
+        sys.path.insert(0, str(BASE_DIR / "scripts"))
+        from strategy_registry import get_hyperopt_candidates, mark_hyperopt_outcome
+        from backtest_runner import run_hyperopt, run_backtest
+
+        # Bound the per-cycle compute. 3 × ~3-10 min/hyperopt = ~10-30 min total.
+        candidates = get_hyperopt_candidates(limit=3)
+        if not candidates:
+            log.info("No marginal-failure candidates to hyperopt.")
+            return
+
+        for cand in candidates:
+            name = cand["name"]
+            log.info(
+                f"  Hyperopt rescue: {name} (had {cand['total_trades']} trades, "
+                f"profit={cand['profit_total_pct']}%, prior verdict={cand['failure_verdict']})"
+            )
+
+            hopt = run_hyperopt(name, epochs=15, timeout_seconds=1800)
+            if not hopt.get("success"):
+                err = hopt.get("error", "unknown")
+                log.warning(f"  {name}: hyperopt itself failed — {err}")
+                mark_hyperopt_outcome(
+                    cand["id"], verdict="HYPEROPT_FAILED",
+                    reason=f"Hyperopt subprocess failed: {err}",
+                )
+                continue
+
+            # Hyperopt wrote <StrategyFile>.json — re-backtest picks it up
+            log.info(f"  {name}: hyperopt found {hopt.get('total_trades', 0)} trades, "
+                     f"{hopt.get('profit_total_pct', 0)}% profit in best epoch. Re-backtesting...")
+
+            bt = run_backtest(name, use_sandbox=True, timeout_seconds=600)
+            if not bt.get("success"):
+                err = bt.get("error", "unknown")
+                log.warning(f"  {name}: re-backtest failed — {err}")
+                mark_hyperopt_outcome(
+                    cand["id"], verdict="HYPEROPT_NO_EDGE",
+                    reason=f"Re-backtest failed after hyperopt: {err}",
+                )
+                continue
+
+            total_trades = bt.get("total_trades", 0)
+            profit_pct = bt.get("profit_total_pct", 0)
+            sharpe = bt.get("sharpe", 0)
+            log.info(f"  {name}: post-hyperopt re-backtest: {total_trades} trades, "
+                     f"{profit_pct}% profit, Sharpe={sharpe}")
+
+            # Same PROMOTE criteria as job_backtest_candidates
+            if total_trades >= 20 and profit_pct > 0 and sharpe > 0:
+                mark_hyperopt_outcome(
+                    cand["id"], verdict="HYPEROPT_PROMOTE",
+                    reason=f"Rescued: {total_trades} trades, {profit_pct}% profit, sharpe={sharpe}",
+                    promote=True,
+                )
+            else:
+                mark_hyperopt_outcome(
+                    cand["id"], verdict="HYPEROPT_NO_EDGE",
+                    reason=f"Still failing: {total_trades} trades, {profit_pct}% profit, sharpe={sharpe}",
+                )
+
+    except Exception as e:
+        log.error(f"Hyperopt rescue job failed: {e}", exc_info=True)
+
+
 def job_reflector():
     """Weekly: LLM reviews recent trades and proposes improvements.
 
@@ -795,6 +877,8 @@ def main():
     scheduler.add_job(job_generate_strategies, "cron", day_of_week="sun", hour=2, minute=0, id="generate_strategies")
     scheduler.add_job(job_backtest_candidates, "cron", day_of_week="sun", hour=2, minute=30, id="backtest_candidates")
     scheduler.add_job(job_reflector, "cron", day_of_week="sun", hour=3, minute=0, id="reflector")
+    # 04:00 buffer after reflector — hyperopt is the slow stage (up to ~30 min total)
+    scheduler.add_job(job_hyperopt_candidates, "cron", day_of_week="sun", hour=4, minute=0, id="hyperopt_candidates")
 
     # --- Risk monitoring (every 5 minutes) ---
     scheduler.add_job(job_check_risk, "interval", minutes=5, id="check_risk")
