@@ -358,20 +358,137 @@ def gate_walk_forward(
 
 
 # ---------------------------------------------------------------------------
-# Correlation filter — stub
+# Correlation filter (R7.4)
 # ---------------------------------------------------------------------------
 
-def gate_correlation(*args, **kwargs) -> dict:
-    """Stub: monthly P&L correlation between candidate and active strategies.
+def trades_to_daily_returns(trades: list[dict]) -> "pd.Series":
+    """Convert a Freqtrade trade list to a daily-indexed Series of returns.
 
-    Real implementation needs per-trade exports from Freqtrade (--export
-    trades), which we currently suppress with --export none for disk
-    reasons. Re-enable once we wire trade-log storage into the registry.
+    Each day's value = sum of `profit_ratio` of trades that CLOSED that day.
+    Days with no closing trades become 0.0. Index is sorted ascending UTC
+    timestamps at midnight.
 
-    Always returns a skip verdict so it's a safe no-op in the gate chain.
+    Empty list returns an empty Series.
     """
-    return _skip("PASS_CORR_STUB",
-                 "correlation gate not yet implemented (no per-trade exports)")
+    import pandas as pd
+
+    if not trades:
+        return pd.Series(dtype=float)
+
+    close_dates = []
+    profits = []
+    for t in trades:
+        cd = t.get("close_date")
+        if cd is None:
+            continue
+        try:
+            close_dates.append(pd.to_datetime(cd, utc=True))
+            profits.append(float(t.get("profit_ratio", 0.0)))
+        except (ValueError, TypeError):
+            continue
+
+    if not close_dates:
+        return pd.Series(dtype=float)
+
+    df = pd.DataFrame({"close": close_dates, "profit": profits})
+    daily = df.groupby(df["close"].dt.floor("D"))["profit"].sum().sort_index()
+
+    # Reindex to full daily range so days with no trades count as 0 returns
+    # (an "inactive" day is meaningful for correlation — two strategies that
+    # are both off on the same days are still correlated in a portfolio
+    # sense, since neither smooths the other's drawdown).
+    full_idx = pd.date_range(daily.index.min(), daily.index.max(),
+                              freq="1D", tz="UTC")
+    return daily.reindex(full_idx, fill_value=0.0)
+
+
+def gate_correlation(
+    candidate_trades: list[dict],
+    active_strategies: list[dict],
+    *,
+    threshold: float = 0.7,
+    min_overlap_days: int = 30,
+    load_trades=None,
+) -> dict:
+    """Reject the candidate if its daily-return series correlates above
+    `threshold` with ANY active strategy.
+
+    candidate_trades: the candidate's exported trade list (already loaded).
+    active_strategies: list of {name, trades_export_path} for each promoted
+        strategy. Entries with empty or missing trades_export_path are
+        skipped silently (legacy strategies pre-R2d).
+    threshold: max acceptable Pearson correlation (default 0.7 — the
+        common diversification cutoff).
+    min_overlap_days: skip a pairwise comparison if the two series overlap
+        for fewer days than this — correlation on tiny samples is noise.
+    load_trades: injectable trade-loader for testability; defaults to
+        trade_attribution.load_trades_from_zip.
+
+    Returns a verdict dict. PASS_CORR_NA when there are no active
+    strategies to compare against, or the candidate has no trades.
+    """
+    if not active_strategies:
+        return _skip("PASS_CORR_NA", "no active strategies to compare against")
+
+    cand_series = trades_to_daily_returns(candidate_trades)
+    if cand_series.empty:
+        return _skip("PASS_CORR_NA", "candidate has no trades to correlate")
+
+    if load_trades is None:
+        # Lazy import to avoid pulling pandas/zipfile into modules that
+        # only need the simpler gates.
+        from trade_attribution import load_trades_from_zip as _load
+        load_trades = _load
+
+    compared = 0
+    checked = []
+    for s in active_strategies:
+        path = s.get("trades_export_path", "")
+        if not path:
+            continue
+        active_trades = load_trades(path, s["name"])
+        if not active_trades:
+            continue
+        active_series = trades_to_daily_returns(active_trades)
+        if active_series.empty:
+            continue
+
+        # Align on the intersection of dates. If the overlap is too small,
+        # correlation is statistical noise — skip the comparison.
+        common_idx = cand_series.index.intersection(active_series.index)
+        if len(common_idx) < min_overlap_days:
+            continue
+        a = cand_series.loc[common_idx]
+        b = active_series.loc[common_idx]
+        # corr returns NaN if either series has zero variance (constant)
+        corr = a.corr(b)
+        if corr != corr:  # NaN check
+            continue
+
+        compared += 1
+        checked.append({"name": s["name"], "corr": round(float(corr), 3),
+                         "overlap_days": int(len(common_idx))})
+        if corr > threshold:
+            return _fail(
+                "FAIL_CORRELATION",
+                f"corr {corr:.2f} > {threshold} with active strategy "
+                f"{s['name']!r} ({len(common_idx)} overlapping days)",
+                threshold=threshold, peer=s["name"], correlation=float(corr),
+                overlap_days=int(len(common_idx)), all_checked=checked,
+            )
+
+    if compared == 0:
+        return _skip(
+            "PASS_CORR_NA",
+            "no comparable active strategies (missing exports or insufficient overlap)",
+        )
+
+    max_corr = max(c["corr"] for c in checked)
+    return _pass(
+        "PASS_CORR",
+        f"max correlation with {compared} active strategies = {max_corr:.2f} (threshold {threshold})",
+        threshold=threshold, max_correlation=max_corr, checked=checked,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -387,11 +504,19 @@ def run_all_gates(
     regime_fractions: dict[str, float] = None,
     walk_forward_results: list[dict] = None,
     base_min_trades: int = 20,
+    candidate_trades: list[dict] = None,
+    active_strategies: list[dict] = None,
+    correlation_threshold: float = 0.7,
 ) -> dict:
     """Run every gate, return {"all_passed": bool, "verdicts": [verdict, ...]}.
 
     The orchestrator should only promote if all_passed is True. Each
     individual verdict is preserved so we can log per-gate outcomes.
+
+    Correlation gate runs only when BOTH candidate_trades AND
+    active_strategies are provided; otherwise it skips. Loading active
+    strategies' trade exports requires file IO so callers that want a
+    pure-data run can omit those args.
     """
     verdicts = []
 
@@ -413,7 +538,12 @@ def run_all_gates(
     else:
         verdicts.append(gate_walk_forward(walk_forward_results))
 
-    verdicts.append(gate_correlation())
+    if candidate_trades is None or active_strategies is None:
+        verdicts.append(_skip("PASS_CORR_NA", "correlation inputs not provided"))
+    else:
+        verdicts.append(gate_correlation(
+            candidate_trades, active_strategies, threshold=correlation_threshold,
+        ))
 
     # A verdict is "blocking" only if .passed is False. Skipped ones pass.
     all_passed = all(v["passed"] for v in verdicts)
