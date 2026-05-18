@@ -266,6 +266,73 @@ def get_candidates() -> list:
     return [dict(r) for r in rows]
 
 
+def get_hyperopt_candidates(limit: int = 3, max_age_days: int = 14) -> list:
+    """Return recently-retired strategies that hyperopt should attempt to rescue.
+
+    Eligible: status='retired' with failure_verdict in FAIL_TOO_FEW or
+    FAIL_UNPROFITABLE (NOT FAIL_BACKTEST — those crashed so the code is broken).
+    Restricted to retirements within the last `max_age_days` so we don't
+    re-process strategies the user already saw and dismissed.
+
+    Sort: highest total_trades first. Strategies with some trades but no edge
+    are MUCH easier to rescue than strategies with zero trades; the latter
+    are over-constrained at the logic level, not just the threshold level.
+    """
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT s.id, s.name, s.filepath, s.thesis, s.target_regime, s.generation_id,
+               s.failure_verdict, s.failure_reason, s.retired_at,
+               COALESCE(br.total_trades, 0) AS total_trades,
+               COALESCE(br.sharpe, 0) AS sharpe,
+               COALESCE(br.profit_total_pct, 0) AS profit_total_pct
+        FROM strategies s
+        LEFT JOIN backtest_results br
+          ON br.id = (SELECT MAX(id) FROM backtest_results WHERE strategy_id = s.id)
+        WHERE s.status = 'retired'
+          AND s.failure_verdict IN ('FAIL_TOO_FEW', 'FAIL_UNPROFITABLE')
+          AND s.retired_at >= datetime('now', ?)
+        ORDER BY total_trades DESC, s.retired_at DESC
+        LIMIT ?
+    """, (f"-{max_age_days} days", limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_hyperopt_outcome(
+    strategy_id: int,
+    verdict: str,
+    reason: str = "",
+    promote: bool = False,
+) -> None:
+    """Update a hyperopted strategy's verdict + optionally promote to active.
+
+    verdict should be HYPEROPT_PROMOTE (rescued) or HYPEROPT_NO_EDGE (still
+    failing). promote=True flips status to 'active' AND clears retired_at —
+    use ONLY when verdict=HYPEROPT_PROMOTE.
+    """
+    conn = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    if promote:
+        conn.execute(
+            """UPDATE strategies
+               SET status = 'active', promoted_at = ?, retired_at = NULL,
+                   failure_verdict = ?, failure_reason = ?
+               WHERE id = ?""",
+            (now, verdict, reason, strategy_id),
+        )
+        log.info(f"Hyperopt PROMOTED strategy_id={strategy_id}: {reason}")
+    else:
+        conn.execute(
+            """UPDATE strategies
+               SET failure_verdict = ?, failure_reason = ?
+               WHERE id = ?""",
+            (verdict, reason, strategy_id),
+        )
+        log.info(f"Hyperopt outcome strategy_id={strategy_id} [{verdict}]: {reason}")
+    conn.commit()
+    conn.close()
+
+
 def get_best_strategy_for_regime(regime: str) -> dict | None:
     """Get the best active strategy for a given regime, ranked by Sharpe on latest backtest."""
     conn = get_db()
