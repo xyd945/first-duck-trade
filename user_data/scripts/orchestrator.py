@@ -930,9 +930,13 @@ section is the strongest signal you have — use it."""
 
         # The reflector is a small, summarization-style task — provider
         # default model is fine. Falls back automatically if primary fails.
+        # Note: 2048 instead of 1024 because reasoning-capable models
+        # (DeepSeek V4 Pro) consume tokens for internal reasoning_content
+        # before emitting the visible answer — a tight budget gets eaten
+        # by the preamble and returns an empty reply.
         reflection = chat_completion(
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1024,
+            max_tokens=2048,
         )
 
         # Save reflection to file
@@ -1002,9 +1006,13 @@ REGIME: <regime> CONFIDENCE: <0.0-1.0> REASON: <one sentence>
 
 Only override if you have strong reason. The indicator regime is usually correct."""
 
+        # 512 instead of 100: reasoning-capable models (DeepSeek V4 Pro)
+        # spend 30-80 tokens on internal reasoning_content before producing
+        # the one-line REGIME: ... response. 100 tokens leaves nothing for
+        # the visible output.
         text = chat_completion(
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
+            max_tokens=512,
         ).strip()
         log.info(f"LLM regime response: {text}")
 

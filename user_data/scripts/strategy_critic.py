@@ -113,11 +113,15 @@ def critic_review(
     user_prompt = f"Review this Freqtrade strategy:\n\n```python\n{code}\n```"
 
     try:
+        # 2048 instead of 1024: reasoning-capable models (DeepSeek V4 Pro)
+        # consume tokens for internal reasoning_content before emitting the
+        # JSON verdict. 1024 was tight enough that a long reasoning
+        # preamble left no room for the issues array.
         text = chat_completion(
             messages=[{"role": "user", "content": user_prompt}],
             system=CRITIC_SYSTEM_PROMPT,
             model=model,
-            max_tokens=1024,
+            max_tokens=2048,
             provider=provider,
         )
     except Exception as e:
