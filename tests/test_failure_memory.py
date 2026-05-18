@@ -206,6 +206,41 @@ def test_get_recent_attributions_orders_newest_first(isolated_registry, tmp_path
     assert set(names) == {"First", "Second", "Third"}
 
 
+def test_get_active_strategies_with_trade_paths(isolated_registry, tmp_path):
+    """Active strategies should come back with their MOST RECENT backtest's
+    trade export path. Candidates and retired strategies are excluded.
+    Strategies with no stored path get an empty string."""
+    sr = isolated_registry
+
+    # active with two backtests — should return the newest path
+    sid_a = sr.register_strategy(name="ActiveTwo", filepath=str(tmp_path/"a.py"),
+                                  thesis="x", target_regime="all")
+    sr.record_backtest(sid_a, {"total_trades": 20, "trades_export_path": "/old.zip"})
+    sr.record_backtest(sid_a, {"total_trades": 25, "trades_export_path": "/new.zip"})
+    sr.promote_strategy(sid_a)
+
+    # active with no export
+    sid_b = sr.register_strategy(name="ActiveLegacy", filepath=str(tmp_path/"b.py"),
+                                  thesis="x", target_regime="all")
+    sr.record_backtest(sid_b, {"total_trades": 20})  # no path
+    sr.promote_strategy(sid_b)
+
+    # candidate (not active) — must NOT appear
+    sr.register_strategy(name="StillCandidate", filepath=str(tmp_path/"c.py"),
+                         thesis="x", target_regime="all")
+
+    # retired — must NOT appear
+    sid_d = sr.register_strategy(name="Gone", filepath=str(tmp_path/"d.py"),
+                                  thesis="x", target_regime="all")
+    sr.retire_strategy(sid_d, reason="test", verdict="FAIL_TEST")
+
+    rows = sr.get_active_strategies_with_trade_paths()
+    by_name = {r["name"]: r for r in rows}
+    assert set(by_name.keys()) == {"ActiveTwo", "ActiveLegacy"}
+    assert by_name["ActiveTwo"]["trades_export_path"] == "/new.zip"
+    assert by_name["ActiveLegacy"]["trades_export_path"] == ""
+
+
 def test_get_recent_attributions_survives_corrupt_json(isolated_registry, tmp_path):
     """One bad JSON row should not block the rest from being returned."""
     sr = isolated_registry

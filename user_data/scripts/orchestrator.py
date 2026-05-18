@@ -577,12 +577,15 @@ def job_backtest_candidates():
     log.info("=== Job: Backtest candidates ===")
     try:
         sys.path.insert(0, str(BASE_DIR / "scripts"))
-        from strategy_registry import get_candidates, record_backtest, promote_strategy, retire_strategy
+        from strategy_registry import (
+            get_candidates, record_backtest, promote_strategy, retire_strategy,
+            get_active_strategies_with_trade_paths,
+        )
         from backtest_runner import run_backtest
         from pipeline_gates import (
             compute_regime_fractions, compute_btc_buyhold,
             gate_regime_conditional_floor, gate_beat_buyhold,
-            gate_walk_forward, run_walk_forward,
+            gate_walk_forward, run_walk_forward, gate_correlation,
         )
         from trade_attribution import (
             build_macro_snapshots, load_trades_from_zip,
@@ -703,6 +706,20 @@ def job_backtest_candidates():
                 # universally-skipping chain to auto-promote losers.
                 baseline_ok = total_trades >= 20 and profit_pct > 0 and sharpe > 0
                 all_gates_passed = all(v["passed"] for v in gate_verdicts)
+
+                # R7.4: correlation gate is expensive (reads zip files per
+                # active strategy) — only run it when the candidate is
+                # otherwise promotion-bound. Cheap-rejects skip this step.
+                if baseline_ok and all_gates_passed and trades_path:
+                    try:
+                        cand_trades = load_trades_from_zip(trades_path, name)
+                        active_peers = get_active_strategies_with_trade_paths()
+                        v = gate_correlation(cand_trades, active_peers)
+                        gate_verdicts.append(v)
+                        log.info(f"  {name} [correlation]: {v['verdict']} — {v['reason']}")
+                        all_gates_passed = v["passed"]
+                    except Exception as e:
+                        log.warning(f"  {name}: correlation gate errored — {e}")
 
                 if baseline_ok and all_gates_passed:
                     promote_strategy(cand["id"])

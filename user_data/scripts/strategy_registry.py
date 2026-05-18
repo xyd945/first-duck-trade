@@ -68,6 +68,18 @@ def _migrate_attribution_column(conn: sqlite3.Connection):
         log.info("Migrated backtest_results: added attribution_json")
 
 
+def _migrate_trades_export_path_column(conn: sqlite3.Connection):
+    """R7.4: add trades_export_path so the correlation gate can locate each
+    promoted strategy's most-recent trade list (it's the raw input it needs
+    to compute daily-return correlation between strategies)."""
+    cols = _column_names(conn, "backtest_results")
+    if "trades_export_path" not in cols:
+        conn.execute(
+            "ALTER TABLE backtest_results ADD COLUMN trades_export_path TEXT DEFAULT ''"
+        )
+        log.info("Migrated backtest_results: added trades_export_path")
+
+
 def init_db():
     """Create tables if they don't exist, then run migrations."""
     conn = get_db()
@@ -112,6 +124,7 @@ def init_db():
     """)
     _migrate_failure_columns(conn)
     _migrate_attribution_column(conn)
+    _migrate_trades_export_path_column(conn)
     conn.commit()
     conn.close()
     log.info(f"Registry initialized at {DB_PATH}")
@@ -168,6 +181,10 @@ def record_backtest(strategy_id: int, results: dict, attribution: dict | None = 
     `attribution` is the R2d per-trade macro-bucket attribution dict
     (see trade_attribution.attribute_trades). Stored as JSON text;
     None or {} is persisted as an empty string for backwards compat.
+
+    `results["trades_export_path"]` (if present) is persisted so the R7.4
+    correlation gate can locate this strategy's trade list later. Optional
+    — strategies backtested before R2d won't have it.
     """
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
@@ -178,8 +195,8 @@ def record_backtest(strategy_id: int, results: dict, attribution: dict | None = 
         """INSERT INTO backtest_results (strategy_id, timerange, sharpe, sortino,
            max_drawdown_pct, max_drawdown_abs, profit_total_pct, profit_total_abs,
            profit_factor, total_trades, win_rate, backtest_days, avg_duration,
-           attribution_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           attribution_json, trades_export_path, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             strategy_id,
             results.get("timerange", ""),
@@ -195,6 +212,7 @@ def record_backtest(strategy_id: int, results: dict, attribution: dict | None = 
             results.get("backtest_days", 0),
             results.get("avg_duration", ""),
             attribution_json,
+            results.get("trades_export_path", ""),
             now,
         ),
     )
@@ -393,6 +411,28 @@ def get_all_strategies(status: str = None) -> list:
         rows = conn.execute(
             "SELECT * FROM strategies ORDER BY created_at DESC"
         ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_active_strategies_with_trade_paths() -> list:
+    """Return active strategies paired with the file path of their most recent
+    trade export (R7.4 correlation gate input).
+
+    Each row: {id, name, target_regime, trades_export_path}. Strategies whose
+    latest backtest has no stored trade export — pre-R2d strategies or
+    backtests run with export_trades=False — get an empty string for the
+    path. The correlation gate must skip those gracefully.
+    """
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT s.id, s.name, s.target_regime,
+               COALESCE(br.trades_export_path, '') AS trades_export_path
+        FROM strategies s
+        LEFT JOIN backtest_results br
+          ON br.id = (SELECT MAX(id) FROM backtest_results WHERE strategy_id = s.id)
+        WHERE s.status = 'active'
+    """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

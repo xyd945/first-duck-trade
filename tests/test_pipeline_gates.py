@@ -19,6 +19,7 @@ from pipeline_gates import (
     run_walk_forward,
     gate_walk_forward,
     gate_correlation,
+    trades_to_daily_returns,
     run_all_gates,
 )
 
@@ -263,14 +264,165 @@ def test_gate_walk_forward_skips_when_empty():
 
 
 # ---------------------------------------------------------------------------
-# Correlation gate (stub)
+# Correlation gate (R7.4)
 # ---------------------------------------------------------------------------
 
-def test_gate_correlation_is_stubbed_pass():
-    v = gate_correlation()
+def _make_trade(close_date, profit_ratio):
+    return {"close_date": close_date, "profit_ratio": profit_ratio, "pair": "BTC/USDT"}
+
+
+def _trades_from_daily_pnl(start, daily_pnl):
+    """One trade per day at noon for the given daily P&Ls."""
+    dates = pd.date_range(start, periods=len(daily_pnl), freq="1D", tz="UTC")
+    return [_make_trade(d.replace(hour=12).isoformat(), p) for d, p in zip(dates, daily_pnl)]
+
+
+def test_trades_to_daily_returns_sums_within_day():
+    trades = [
+        _make_trade("2026-01-15T09:00:00+00:00", 0.01),
+        _make_trade("2026-01-15T15:00:00+00:00", -0.005),
+        _make_trade("2026-01-17T12:00:00+00:00", 0.02),
+    ]
+    s = trades_to_daily_returns(trades)
+    # Jan 15 (sum of two), Jan 16 (no trades → 0), Jan 17
+    assert s["2026-01-15"] == pytest.approx(0.005)
+    assert s["2026-01-16"] == pytest.approx(0.0)
+    assert s["2026-01-17"] == pytest.approx(0.02)
+
+
+def test_trades_to_daily_returns_empty_input():
+    assert trades_to_daily_returns([]).empty
+
+
+def test_trades_to_daily_returns_skips_malformed():
+    trades = [
+        {"close_date": "2026-01-15T12:00:00+00:00", "profit_ratio": 0.01},
+        {"profit_ratio": 0.05},  # no close_date — must skip
+        {"close_date": "not-a-date", "profit_ratio": 0.02},  # parse fail — skip
+    ]
+    s = trades_to_daily_returns(trades)
+    assert len(s) == 1
+    assert s.iloc[0] == pytest.approx(0.01)
+
+
+def test_gate_correlation_skips_when_no_active_strategies():
+    v = gate_correlation(_trades_from_daily_pnl("2026-01-01", [0.01]*40), [])
     assert v["passed"] is True
     assert v.get("skipped") is True
-    assert "not yet" in v["reason"]
+
+
+def test_gate_correlation_skips_when_candidate_has_no_trades():
+    v = gate_correlation([], [{"name": "X", "trades_export_path": "/some/path.zip"}])
+    assert v["passed"] is True
+    assert v.get("skipped") is True
+
+
+def test_gate_correlation_rejects_highly_correlated_candidate():
+    """Identical daily P&L → correlation 1.0 → fail."""
+    pnl = [0.01, -0.02, 0.005, -0.01, 0.03] * 8  # 40 days
+    cand = _trades_from_daily_pnl("2026-01-01", pnl)
+    peer_trades = _trades_from_daily_pnl("2026-01-01", pnl)
+
+    def fake_load(path, name):
+        return peer_trades
+
+    v = gate_correlation(
+        cand,
+        [{"name": "PeerA", "trades_export_path": "/fake.zip"}],
+        threshold=0.7, load_trades=fake_load,
+    )
+    assert v["passed"] is False
+    assert v["verdict"] == "FAIL_CORRELATION"
+    assert v["details"]["peer"] == "PeerA"
+    assert v["details"]["correlation"] == pytest.approx(1.0)
+
+
+def test_gate_correlation_passes_uncorrelated_pair():
+    """Anti-correlated daily P&L → corr negative → pass."""
+    pnl_a = [0.01, -0.02, 0.005, -0.01, 0.03] * 8
+    pnl_b = [-0.01, 0.02, -0.005, 0.01, -0.03] * 8
+    cand = _trades_from_daily_pnl("2026-01-01", pnl_a)
+    peer_trades = _trades_from_daily_pnl("2026-01-01", pnl_b)
+
+    v = gate_correlation(
+        cand,
+        [{"name": "PeerB", "trades_export_path": "/fake.zip"}],
+        threshold=0.7, load_trades=lambda p, n: peer_trades,
+    )
+    assert v["passed"] is True
+    assert v["verdict"] == "PASS_CORR"
+    assert v["details"]["max_correlation"] < 0
+
+
+def test_gate_correlation_skips_low_overlap_pair():
+    """Two strategies with only 10 overlapping days → correlation noise →
+    skip the comparison; if no other peers, skip the whole gate."""
+    cand = _trades_from_daily_pnl("2026-01-01", [0.01]*10)  # Jan 1-10
+    peer_trades = _trades_from_daily_pnl("2026-02-01", [0.01]*10)  # Feb 1-10 (no overlap)
+
+    v = gate_correlation(
+        cand,
+        [{"name": "PeerC", "trades_export_path": "/fake.zip"}],
+        threshold=0.7, min_overlap_days=30,
+        load_trades=lambda p, n: peer_trades,
+    )
+    assert v["passed"] is True
+    assert v.get("skipped") is True
+
+
+def test_gate_correlation_rejects_on_max_across_multiple_peers():
+    """A candidate correlated with peer 2 but not peer 1 must still fail."""
+    pnl = [0.01, -0.02, 0.005, -0.01, 0.03] * 8
+    cand = _trades_from_daily_pnl("2026-01-01", pnl)
+
+    peer1_trades = _trades_from_daily_pnl("2026-01-01", [v * -1 for v in pnl])
+    peer2_trades = _trades_from_daily_pnl("2026-01-01", pnl)  # identical → 1.0
+
+    def loader(path, name):
+        return peer1_trades if name == "Peer1" else peer2_trades
+
+    v = gate_correlation(
+        cand,
+        [{"name": "Peer1", "trades_export_path": "/p1.zip"},
+         {"name": "Peer2", "trades_export_path": "/p2.zip"}],
+        threshold=0.7, load_trades=loader,
+    )
+    assert v["passed"] is False
+    assert v["details"]["peer"] == "Peer2"
+
+
+def test_gate_correlation_skips_peer_with_no_export_path():
+    """An active peer pre-R2d has no trades_export_path stored — skip it
+    silently rather than failing the gate."""
+    pnl = [0.01, -0.02, 0.005, -0.01, 0.03] * 8
+    cand = _trades_from_daily_pnl("2026-01-01", pnl)
+
+    v = gate_correlation(
+        cand,
+        [{"name": "Legacy", "trades_export_path": ""}],
+        threshold=0.7, load_trades=lambda p, n: pytest.fail("should not be called"),
+    )
+    assert v["passed"] is True
+    assert v.get("skipped") is True
+
+
+def test_gate_correlation_includes_all_checked_in_details():
+    """Even on success, the verdict should show what was checked so the
+    orchestrator log captures the per-peer numbers."""
+    pnl_a = [0.01, -0.02, 0.005, -0.01, 0.03] * 8
+    pnl_b = [-0.01, 0.02, -0.005, 0.01, -0.03] * 8
+    cand = _trades_from_daily_pnl("2026-01-01", pnl_a)
+    peer_trades = _trades_from_daily_pnl("2026-01-01", pnl_b)
+
+    v = gate_correlation(
+        cand,
+        [{"name": "PeerB", "trades_export_path": "/fake.zip"}],
+        threshold=0.7, load_trades=lambda p, n: peer_trades,
+    )
+    assert v["passed"] is True
+    assert len(v["details"]["checked"]) == 1
+    assert v["details"]["checked"][0]["name"] == "PeerB"
+    assert "overlap_days" in v["details"]["checked"][0]
 
 
 # ---------------------------------------------------------------------------
