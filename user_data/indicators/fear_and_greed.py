@@ -51,6 +51,12 @@ def add_fear_and_greed(dataframe: pd.DataFrame, fast_length: int = 21, slow_leng
     # --- 1. PMACD (Price Convergence/Divergence) ---
     # Pine: pmacd = (close / ta.ema(close, slowLength) - 1) * 100
     ema_slow = ta.ema(df['close'], length=slow_length)
+    # pandas_ta returns None when the input has fewer non-NaN values than
+    # `length` — Freqtrade's mini-backtest can hit this if startup candles
+    # haven't loaded yet. Fall back to a zero-centered Series so the rest
+    # of the indicator pipeline still produces something.
+    if ema_slow is None:
+        ema_slow = pd.Series(df['close'].mean(), index=df.index)
     pmacd = (df['close'] / ema_slow - 1) * 100
     
     # --- 2. RoR (Rate of Return) ---
@@ -90,6 +96,9 @@ def add_fear_and_greed(dataframe: pd.DataFrame, fast_length: int = 21, slow_leng
     if not vix_df.empty:
         # Calculate metric on VIX dataframe first
         vix_ema = ta.ema(vix_df['close'], length=slow_length)
+        if vix_ema is None:
+            # Too few VIX rows to compute EMA — fall back to neutral signal
+            vix_ema = pd.Series(vix_df['close'].mean(), index=vix_df.index)
         vix_dbq = -(vix_df['close'] / vix_ema - 1) * 100
         
         # Merge to main dataframe using ffill (Daily data to lower timeframe)

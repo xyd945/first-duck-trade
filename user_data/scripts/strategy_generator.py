@@ -643,6 +643,7 @@ def generate_strategy(
                 "validation": result,
                 "critic": critic,
                 "generation_id": attempt_id,
+                "class_name": spec.get("name"),
             }
 
         except Exception as e:
@@ -657,6 +658,154 @@ def generate_strategy(
     return {"success": False, "error": "Exhausted all retries"}
 
 
+def _summarize_backtest_for_llm(bt: dict) -> str:
+    """Render a mini-backtest result into a short, LLM-friendly diagnostic.
+
+    Different result shapes get different framings because what the LLM needs
+    to fix is very different in each case.
+    """
+    if not bt.get("success"):
+        return (
+            f"The strategy was generated but FAILED to backtest: {bt.get('error', 'unknown')}. "
+            "Check for import errors, missing columns referenced in entry/exit logic, "
+            "or syntax issues in the spec's expressions."
+        )
+    trades = bt.get("total_trades", 0)
+    profit = bt.get("profit_total_pct", 0.0)
+    sharpe = bt.get("sharpe", 0.0)
+    drawdown = bt.get("max_drawdown_pct", 0.0)
+
+    if trades == 0:
+        return (
+            "Your previous strategy produced ZERO TRADES on a 30-day backtest. "
+            "The core conditions never simultaneously evaluated True. "
+            "Diagnose: either tighten the number of `entry.core` conditions (3 max), "
+            "loosen the thresholds in your IntParameter/DecimalParameter defaults, "
+            "or move some core conditions into `macro_confidence` so they don't all need to fire."
+        )
+    if trades < 5:
+        return (
+            f"Your previous strategy produced only {trades} trades over 30 days — "
+            f"far too few to evaluate. Loosen entry thresholds or relax the macro_min_confidence "
+            f"(try 0.3 instead of 0.5)."
+        )
+    if profit <= 0 and sharpe <= 0:
+        return (
+            f"Your previous strategy traded {trades} times over 30 days but lost money "
+            f"({profit:.2f}% return, sharpe {sharpe:.2f}, drawdown {drawdown:.2f}%). "
+            f"The entry timing or exit conditions are wrong — reconsider the thesis. "
+            f"Try a different indicator family, invert the entry direction, or tighten exits."
+        )
+    return (
+        f"Your previous strategy was passable: {trades} trades, {profit:.2f}% profit, "
+        f"sharpe {sharpe:.2f}. See if you can improve it further."
+    )
+
+
+def generate_and_iterate(
+    target_regime: str = "all",
+    context: str = "",
+    existing_results: str = "",
+    reflector_insights: str = "",
+    failure_examples: str = "",
+    model: str = "claude-sonnet-4-20250514",
+    max_turns: int = 3,
+    accept_min_trades: int = 5,
+    backtest_fn=None,
+) -> dict:
+    """Generate → mini-backtest → refine, up to max_turns times.
+
+    On each turn:
+      1. Call generate_strategy (which already does validation + critic with
+         their own internal retries).
+      2. Run a 30-day mini backtest on the generated file.
+      3. Score the result. ACCEPT if trades >= accept_min_trades AND
+         (profit > 0 OR sharpe > 0). The bar is deliberately low — the real
+         quality gate is the orchestrator's full backtest + hyperopt later.
+      4. If not accepted and turns remain, append a structured backtest
+         diagnostic to existing_results and loop.
+      5. After max_turns, return the BEST attempt seen (most trades + best
+         profit) with `iterated=True` and `turns_used=N` flags.
+
+    backtest_fn is injected for testability. Defaults to backtest_runner.run_mini_backtest.
+    """
+    if backtest_fn is None:
+        # Lazy import — avoids hard dep when only the generator is exercised in tests.
+        # We deliberately do NOT use run_mini_backtest (30 days): the strategy's
+        # startup_candle_count is 200, and freqtrade requires ALL of those to live
+        # before the timerange start. 30 days = 720 1h candles which doesn't leave
+        # enough history room — Freqtrade trims to zero usable data and exits
+        # with "no data left after adjusting for startup candles". 90 days gives
+        # 2160 candles, comfortably accommodating the 200-candle prelude.
+        sys.path.insert(0, str(BASE_DIR / "scripts"))
+        from backtest_runner import run_mini_backtest
+
+        def backtest_fn(strategy_name: str) -> dict:
+            return run_mini_backtest(strategy_name, days=90)
+
+    best: dict | None = None
+    best_score = -float("inf")
+    accumulated_feedback = existing_results
+
+    for turn in range(max_turns):
+        log.info(f"=== Iterative generation, turn {turn + 1}/{max_turns} for regime={target_regime} ===")
+        gen = generate_strategy(
+            target_regime=target_regime,
+            context=context,
+            existing_results=accumulated_feedback,
+            reflector_insights=reflector_insights,
+            failure_examples=failure_examples,
+            model=model,
+        )
+        if not gen.get("success"):
+            # generate_strategy itself failed (spec parse, validation, etc.). Give up.
+            log.warning(f"  Generation itself failed on turn {turn + 1}: {gen.get('error')}")
+            return gen
+
+        strategy_class = gen.get("class_name") or "unknown"
+        log.info(f"  Generation succeeded ({strategy_class}). Running mini-backtest...")
+
+        bt = backtest_fn(strategy_class)
+        log.info(
+            f"  Mini-backtest: success={bt.get('success')}, "
+            f"trades={bt.get('total_trades', 0)}, "
+            f"profit={bt.get('profit_total_pct', 0)}%, "
+            f"sharpe={bt.get('sharpe', 0)}"
+        )
+
+        # Score the attempt — trade count dominates (a strategy that fires
+        # can be rescued by hyperopt; a 0-trade strategy cannot). Profit and
+        # sharpe break ties when trade counts are similar.
+        trades = bt.get("total_trades", 0)
+        profit = bt.get("profit_total_pct", 0.0) or 0.0
+        sharpe = bt.get("sharpe", 0.0) or 0.0
+        score = trades * 100 + profit * 10 + sharpe
+        if score > best_score:
+            best_score = score
+            best = {**gen, "mini_backtest": bt, "turn": turn + 1}
+
+        # Acceptance check — low bar, just confirms the strategy is alive
+        accepted = (
+            bt.get("success")
+            and trades >= accept_min_trades
+            and (profit > 0 or sharpe > 0)
+        )
+        if accepted:
+            log.info(f"  ACCEPTED on turn {turn + 1}")
+            return {**gen, "mini_backtest": bt, "iterated": True, "turns_used": turn + 1, "accepted": True}
+
+        if turn + 1 < max_turns:
+            diag = _summarize_backtest_for_llm(bt)
+            log.info(f"  Not accepted — feeding back to LLM for refinement:\n    {diag}")
+            accumulated_feedback += f"\n\nPREVIOUS ATTEMPT BACKTEST RESULT:\n{diag}"
+
+    # Exhausted turns — return the best attempt we saw, marked as not accepted
+    log.warning(f"  Iterative generation exhausted {max_turns} turns without acceptance")
+    if best is None:
+        return {"success": False, "error": "no attempts succeeded"}
+    return {**best, "iterated": True, "turns_used": max_turns, "accepted": False}
+
+
 def generate_batch(
     count: int = 5,
     regimes: list = None,
@@ -664,6 +813,8 @@ def generate_batch(
     existing_results: str = "",
     reflector_insights: str = "",
     get_failures_for_regime=None,
+    iterative: bool = False,
+    max_turns: int = 3,
 ) -> list:
     """Generate a batch of strategies across different regimes.
 
@@ -680,13 +831,23 @@ def generate_batch(
         regime = regimes[i % len(regimes)]
         log.info(f"=== Generating strategy {i+1}/{count} for regime: {regime} ===")
         failures = get_failures_for_regime(regime) if get_failures_for_regime else ""
-        result = generate_strategy(
-            target_regime=regime,
-            context=context,
-            existing_results=existing_results,
-            reflector_insights=reflector_insights,
-            failure_examples=failures,
-        )
+        if iterative:
+            result = generate_and_iterate(
+                target_regime=regime,
+                context=context,
+                existing_results=existing_results,
+                reflector_insights=reflector_insights,
+                failure_examples=failures,
+                max_turns=max_turns,
+            )
+        else:
+            result = generate_strategy(
+                target_regime=regime,
+                context=context,
+                existing_results=existing_results,
+                reflector_insights=reflector_insights,
+                failure_examples=failures,
+            )
         results.append(result)
 
         if result["success"]:
