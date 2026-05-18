@@ -154,7 +154,8 @@ class {name}(BaseGeneratedStrategy):
 {params_block}
 
     def populate_indicators(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-        # Macro context (fgi, vix, gold, dxy, spx, btc_funding_rate, btc_oi, btc_oi_pct_change_24h)
+        # Macro context (fgi, vix, gold, dxy, spx, btc_funding_rate, btc_oi,
+        # btc_oi_pct_change_24h, eth_btc_ratio, eth_btc_change_7d, alt_strength_zscore_30d)
         dataframe = add_external_data(dataframe)
 
 {indicators_block}

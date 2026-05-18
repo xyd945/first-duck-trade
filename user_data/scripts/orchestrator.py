@@ -220,13 +220,18 @@ def save_risk_state(state: dict):
 # ---------------------------------------------------------------------------
 
 def job_fetch_macro_data():
-    """Daily: fetch macro data (Yahoo) + BTC perp signals (Binance Futures)."""
+    """Daily: fetch macro (Yahoo) + BTC perp (Binance Futures) + ETH/BTC (Binance spot)."""
     log.info("=== Job: Fetch macro data ===")
     macro_script = BASE_DIR / "scripts" / "fetch_extra_data.py"
     perp_script = BASE_DIR / "scripts" / "fetch_perp_data.py"
-    # Run each fetcher independently so a Yahoo outage doesn't block Binance
-    # (and vice versa). Errors are logged but don't crash the orchestrator.
-    for label, script in (("Macro (Yahoo)", macro_script), ("Perp (Binance)", perp_script)):
+    eth_btc_script = BASE_DIR / "scripts" / "fetch_eth_btc.py"
+    # Run each fetcher independently so one outage doesn't block the others.
+    # Errors are logged but don't crash the orchestrator.
+    for label, script in (
+        ("Macro (Yahoo)", macro_script),
+        ("Perp (Binance)", perp_script),
+        ("ETH/BTC (Binance spot)", eth_btc_script),
+    ):
         try:
             subprocess.run([sys.executable, str(script)], check=True, timeout=120)
             log.info(f"{label} fetch completed.")
