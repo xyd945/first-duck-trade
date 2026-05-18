@@ -284,6 +284,7 @@ def build_generation_prompt(
     generation_id: str = "",
     reflector_insights: str = "",
     failure_examples: str = "",
+    attribution_patterns: str = "",
 ) -> str:
     """Build the user prompt for strategy generation.
 
@@ -294,6 +295,15 @@ def build_generation_prompt(
     failure_examples: pre-rendered block of prior strategies that failed
     backtest, with their failure reason + entry logic. From
     `_format_failure_examples(registry.get_recent_failures(...))`.
+
+    attribution_patterns: pre-rendered macro-bucket attribution rollup —
+    which conditions consistently favored wins vs losses in recent
+    backtests of comparable strategies. From
+    `trade_attribution.format_aggregate_for_generator(
+        aggregate_attributions_by_bucket(rows, regime), target_regime)`.
+    Sits ABOVE failure_examples because it's prescriptive ("aim here")
+    vs prohibitive ("don't do that") — the LLM gets a positive target
+    before the don't-list.
     """
 
     prompt = f"""Generate a new Freqtrade trading strategy for SPOT crypto trading (LONG only, no shorting).
@@ -307,6 +317,11 @@ GENERATION ID: {generation_id}
         prompt += f"""LESSONS FROM RECENT REFLECTIONS (trade review agent):
 These are observations from live paper-trading. Apply the takeaways where they fit.
 {reflector_insights}
+
+"""
+
+    if attribution_patterns:
+        prompt += f"""{attribution_patterns}
 
 """
 
@@ -522,6 +537,7 @@ def generate_strategy(
     max_retries: int = 1,
     reflector_insights: str = "",
     failure_examples: str = "",
+    attribution_patterns: str = "",
 ) -> dict:
     """
     Generate a new strategy using Claude API.
@@ -562,6 +578,7 @@ def generate_strategy(
             generation_id=attempt_id,
             reflector_insights=reflector_insights,
             failure_examples=failure_examples,
+            attribution_patterns=attribution_patterns,
         )
 
         try:
@@ -730,6 +747,7 @@ def generate_and_iterate(
     existing_results: str = "",
     reflector_insights: str = "",
     failure_examples: str = "",
+    attribution_patterns: str = "",
     model: str = "claude-sonnet-4-20250514",
     max_turns: int = 3,
     accept_min_trades: int = 5,
@@ -777,6 +795,7 @@ def generate_and_iterate(
             existing_results=accumulated_feedback,
             reflector_insights=reflector_insights,
             failure_examples=failure_examples,
+            attribution_patterns=attribution_patterns,
             model=model,
         )
         if not gen.get("success"):
@@ -835,6 +854,7 @@ def generate_batch(
     existing_results: str = "",
     reflector_insights: str = "",
     get_failures_for_regime=None,
+    get_attribution_for_regime=None,
     iterative: bool = False,
     max_turns: int = 3,
 ) -> list:
@@ -844,6 +864,11 @@ def generate_batch(
         Returns a pre-formatted failure_examples block for the given regime.
         Lets the caller inject per-regime failure memory without re-querying
         the registry here.
+
+    get_attribution_for_regime: optional callable(regime: str) -> str
+        Returns a pre-formatted historical attribution patterns block for the
+        given regime. Same callable pattern as get_failures_for_regime so the
+        orchestrator can fan registry queries out cleanly.
     """
     if regimes is None:
         regimes = ["trending", "ranging", "breakout", "all"]
@@ -853,6 +878,7 @@ def generate_batch(
         regime = regimes[i % len(regimes)]
         log.info(f"=== Generating strategy {i+1}/{count} for regime: {regime} ===")
         failures = get_failures_for_regime(regime) if get_failures_for_regime else ""
+        attribution = get_attribution_for_regime(regime) if get_attribution_for_regime else ""
         if iterative:
             result = generate_and_iterate(
                 target_regime=regime,
@@ -860,6 +886,7 @@ def generate_batch(
                 existing_results=existing_results,
                 reflector_insights=reflector_insights,
                 failure_examples=failures,
+                attribution_patterns=attribution,
                 max_turns=max_turns,
             )
         else:
@@ -869,6 +896,7 @@ def generate_batch(
                 existing_results=existing_results,
                 reflector_insights=reflector_insights,
                 failure_examples=failures,
+                attribution_patterns=attribution,
             )
         results.append(result)
 

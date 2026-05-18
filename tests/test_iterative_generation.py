@@ -243,3 +243,61 @@ def test_generate_batch_non_iterative_uses_single_shot():
 
     assert len(results) == 2
     assert mock_gen.call_count == 2
+
+
+def test_generate_batch_threads_attribution_per_regime():
+    """get_attribution_for_regime callable must be invoked per-regime and
+    its return value forwarded as attribution_patterns to generate_strategy."""
+    from strategy_generator import generate_batch
+
+    seen_regimes = []
+    seen_attributions = []
+
+    def fake_attr(regime):
+        seen_regimes.append(regime)
+        return f"ATTRIB_FOR_{regime}"
+
+    def capture_call(**kwargs):
+        seen_attributions.append((kwargs.get("target_regime"),
+                                    kwargs.get("attribution_patterns")))
+        return _BATCH_SUCCESS
+
+    with patch("strategy_generator.generate_strategy", side_effect=capture_call):
+        generate_batch(
+            count=3,
+            regimes=["trending", "ranging", "breakout"],
+            get_attribution_for_regime=fake_attr,
+        )
+
+    assert seen_regimes == ["trending", "ranging", "breakout"]
+    assert seen_attributions == [
+        ("trending", "ATTRIB_FOR_trending"),
+        ("ranging", "ATTRIB_FOR_ranging"),
+        ("breakout", "ATTRIB_FOR_breakout"),
+    ]
+
+
+def test_generate_strategy_includes_attribution_patterns_in_prompt():
+    """The new attribution_patterns kwarg should land in the user prompt."""
+    from strategy_generator import build_generation_prompt
+
+    prompt = build_generation_prompt(
+        target_regime="trending",
+        attribution_patterns="MAGIC_ATTRIBUTION_BLOCK_xyz123",
+    )
+    assert "MAGIC_ATTRIBUTION_BLOCK_xyz123" in prompt
+
+
+def test_attribution_section_renders_above_failure_examples():
+    """attribution_patterns is prescriptive ('aim here'), failure_examples is
+    prohibitive ('don't do that'). The positive target should come first."""
+    from strategy_generator import build_generation_prompt
+
+    prompt = build_generation_prompt(
+        target_regime="all",
+        attribution_patterns="MARKER_ATTRIBUTION",
+        failure_examples="MARKER_FAILURE",
+    )
+    attr_idx = prompt.index("MARKER_ATTRIBUTION")
+    fail_idx = prompt.index("MARKER_FAILURE")
+    assert attr_idx < fail_idx

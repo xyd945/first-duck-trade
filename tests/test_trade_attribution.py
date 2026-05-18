@@ -18,6 +18,8 @@ from trade_attribution import (
     attribute_trades,
     summarize_attribution,
     format_attributions_for_reflector,
+    aggregate_attributions_by_bucket,
+    format_aggregate_for_generator,
 )
 
 
@@ -347,6 +349,165 @@ def test_format_attributions_respects_max_chars():
     out = format_attributions_for_reflector(rows, max_chars=500)
     assert len(out) <= 500 + len("\n[...truncated]")
     assert "[...truncated]" in out
+
+
+# ---------------------------------------------------------------------------
+# aggregate_attributions_by_bucket — cross-strategy rollup
+# ---------------------------------------------------------------------------
+
+def _agg_row(name, regime, pos, neg, buckets):
+    """Build the shape get_recent_attributions returns, for aggregation tests."""
+    return {
+        "name": name, "target_regime": regime, "status": "candidate",
+        "total_trades": sum(b["trades"] for b in buckets.values()) or 20,
+        "profit_total_pct": 1.0, "sharpe": 0.5,
+        "attribution": {
+            "total_trades": 20, "overall_win_rate": 0.5,
+            "buckets": buckets,
+            "top_positive_lift": pos, "top_negative_lift": neg,
+        },
+    }
+
+
+def test_aggregate_empty_input():
+    out = aggregate_attributions_by_bucket([])
+    assert out["n_strategies"] == 0
+    assert out["buckets"] == {}
+    assert out["top_consistent_winners"] == []
+
+
+def test_aggregate_counts_appearances_across_strategies():
+    rows = [
+        _agg_row("A", "trending", ["fgi_fear"], ["vix_low"], {
+            "fgi_fear": {"trades": 10, "wins": 8, "win_rate": 0.8, "lift": 0.20},
+            "vix_low": {"trades": 10, "wins": 3, "win_rate": 0.3, "lift": -0.20},
+        }),
+        _agg_row("B", "trending", ["fgi_fear"], [], {
+            "fgi_fear": {"trades": 12, "wins": 9, "win_rate": 0.75, "lift": 0.15},
+        }),
+        _agg_row("C", "trending", [], ["vix_low"], {
+            "vix_low": {"trades": 8, "wins": 2, "win_rate": 0.25, "lift": -0.25},
+        }),
+    ]
+    out = aggregate_attributions_by_bucket(rows)
+    assert out["n_strategies"] == 3
+    assert out["buckets"]["fgi_fear"]["appears_positive"] == 2
+    assert out["buckets"]["fgi_fear"]["appears_negative"] == 0
+    # avg_lift averaged across the 2 strategies that had fgi_fear data
+    assert out["buckets"]["fgi_fear"]["avg_lift"] == pytest.approx((0.20 + 0.15) / 2)
+    assert out["buckets"]["vix_low"]["appears_negative"] == 2
+    assert "fgi_fear" in out["top_consistent_winners"]
+    assert "vix_low" in out["top_consistent_losers"]
+
+
+def test_aggregate_filters_by_regime():
+    rows = [
+        _agg_row("A", "trending", ["fgi_fear"], [],
+                  {"fgi_fear": {"trades": 10, "wins": 8, "win_rate": 0.8, "lift": 0.2}}),
+        _agg_row("B", "ranging", ["fgi_fear"], [],
+                  {"fgi_fear": {"trades": 10, "wins": 8, "win_rate": 0.8, "lift": 0.2}}),
+        _agg_row("C", "all", ["fgi_fear"], [],
+                  {"fgi_fear": {"trades": 10, "wins": 8, "win_rate": 0.8, "lift": 0.2}}),
+    ]
+    out = aggregate_attributions_by_bucket(rows, regime="trending")
+    # Strict match — only A; target_regime='all' is NOT widened in
+    assert out["n_strategies"] == 1
+    assert out["buckets"]["fgi_fear"]["appears_positive"] == 1
+
+
+def test_aggregate_excludes_single_strategy_quirks():
+    """A bucket appearing in only 1 strategy must not become a 'consistent pattern'."""
+    rows = [
+        _agg_row("A", "trending", ["fgi_fear"], [],
+                  {"fgi_fear": {"trades": 10, "wins": 8, "win_rate": 0.8, "lift": 0.2}}),
+        _agg_row("B", "trending", [], [],
+                  {"vix_low": {"trades": 10, "wins": 5, "win_rate": 0.5, "lift": 0.0}}),
+    ]
+    out = aggregate_attributions_by_bucket(rows, min_strategies=2)
+    # fgi_fear has appears_positive=1, only 1 strategy — below threshold
+    assert "fgi_fear" not in out["top_consistent_winners"]
+
+
+def test_aggregate_requires_net_positive_AND_positive_avg_lift_for_winners():
+    """A bucket positive in 3 (lift +0.01) and negative in 2 (lift -0.10) has
+    net +1 but avg lift is negative — must NOT be classified as a winner."""
+    rows = [
+        _agg_row("A", "all", ["x"], [], {"x": {"trades": 10, "wins": 5, "win_rate": 0.5, "lift": 0.01}}),
+        _agg_row("B", "all", ["x"], [], {"x": {"trades": 10, "wins": 5, "win_rate": 0.5, "lift": 0.01}}),
+        _agg_row("C", "all", ["x"], [], {"x": {"trades": 10, "wins": 5, "win_rate": 0.5, "lift": 0.01}}),
+        _agg_row("D", "all", [], ["x"], {"x": {"trades": 10, "wins": 3, "win_rate": 0.3, "lift": -0.20}}),
+        _agg_row("E", "all", [], ["x"], {"x": {"trades": 10, "wins": 3, "win_rate": 0.3, "lift": -0.20}}),
+    ]
+    out = aggregate_attributions_by_bucket(rows)
+    # avg = (3*0.01 + 2*-0.20)/5 = (0.03 - 0.40)/5 = -0.074 → not a winner
+    assert out["buckets"]["x"]["avg_lift"] == pytest.approx(-0.074, abs=1e-3)
+    assert "x" not in out["top_consistent_winners"]
+
+
+# ---------------------------------------------------------------------------
+# format_aggregate_for_generator
+# ---------------------------------------------------------------------------
+
+def test_format_aggregate_empty_returns_empty():
+    assert format_aggregate_for_generator({"n_strategies": 0}, "trending") == ""
+
+
+def test_format_aggregate_with_no_rankable_buckets_returns_empty():
+    """0 winners and 0 losers → no useful signal → skip the section."""
+    agg = {"n_strategies": 3, "regime": "trending", "buckets": {},
+           "top_consistent_winners": [], "top_consistent_losers": []}
+    assert format_aggregate_for_generator(agg, "trending") == ""
+
+
+def test_format_aggregate_renders_winners_and_losers():
+    agg = {
+        "n_strategies": 4, "regime": "trending",
+        "buckets": {
+            "fgi_fear": {"appears_positive": 3, "appears_negative": 0,
+                          "n_with_data": 3, "avg_lift": 0.08},
+            "vix_low": {"appears_positive": 0, "appears_negative": 3,
+                         "n_with_data": 3, "avg_lift": -0.06},
+        },
+        "top_consistent_winners": ["fgi_fear"],
+        "top_consistent_losers": ["vix_low"],
+    }
+    out = format_aggregate_for_generator(agg, "trending")
+    assert "fgi_fear" in out
+    assert "vix_low" in out
+    assert "trending" in out
+    assert "WINS" in out and "LOSSES" in out
+    # Counts visible
+    assert "3/4" in out
+    # Lift signs preserved
+    assert "+0.08" in out
+    assert "-0.06" in out
+
+
+def test_format_aggregate_labels_pool_wide_when_regime_mismatch():
+    """When the aggregate is pool-wide but generator is building for a
+    specific regime, the section header must say so."""
+    agg = {
+        "n_strategies": 6, "regime": None,
+        "buckets": {"fgi_fear": {"appears_positive": 4, "appears_negative": 0,
+                                  "n_with_data": 4, "avg_lift": 0.07}},
+        "top_consistent_winners": ["fgi_fear"], "top_consistent_losers": [],
+    }
+    out = format_aggregate_for_generator(agg, "breakout")
+    assert "pool-wide" in out.lower()
+    assert "breakout" in out
+
+
+def test_format_aggregate_respects_max_chars():
+    buckets = {f"bucket_{i}": {"appears_positive": 5, "appears_negative": 0,
+                                 "n_with_data": 5, "avg_lift": 0.10} for i in range(20)}
+    agg = {
+        "n_strategies": 10, "regime": "all",
+        "buckets": buckets,
+        "top_consistent_winners": [f"bucket_{i}" for i in range(20)],
+        "top_consistent_losers": [],
+    }
+    out = format_aggregate_for_generator(agg, "all", max_chars=400)
+    assert len(out) <= 400 + len("\n[...truncated]")
 
 
 def test_summarize_renders_top_buckets():
