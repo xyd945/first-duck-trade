@@ -428,7 +428,10 @@ def job_generate_strategies():
         from strategy_generator import generate_batch, _format_failure_examples, dedupe_class_name
         from strategy_registry import (
             register_strategy, get_registry_stats, get_strategy_by_name,
-            get_recent_failures, load_recent_reflections,
+            get_recent_failures, load_recent_reflections, get_recent_attributions,
+        )
+        from trade_attribution import (
+            aggregate_attributions_by_bucket, format_aggregate_for_generator,
         )
 
         # Get current regime for context
@@ -451,6 +454,35 @@ def job_generate_strategies():
             log.info(f"  Failure memory for regime={regime}: {len(rows)} prior failures")
             return _format_failure_examples(rows)
 
+        # Build the attribution patterns block per regime, with pool-wide
+        # fallback when a regime has fewer than 3 strategies with attribution
+        # (a single-strategy aggregate is just that strategy's attribution
+        # restated — no cross-strategy signal). The pool-wide rollup
+        # always uses the full set of attributed strategies so the LLM still
+        # gets evidence-based guidance even on rare regimes.
+        all_attributions = get_recent_attributions(n=20, min_trades=10)
+
+        def attribution_for(regime: str) -> str:
+            per_regime = aggregate_attributions_by_bucket(all_attributions, regime=regime)
+            if per_regime["n_strategies"] >= 3:
+                log.info(
+                    f"  Attribution patterns for regime={regime}: "
+                    f"{per_regime['n_strategies']} strategies, "
+                    f"{len(per_regime['top_consistent_winners'])} winners, "
+                    f"{len(per_regime['top_consistent_losers'])} losers"
+                )
+                return format_aggregate_for_generator(per_regime, regime)
+            # Fallback to pool-wide
+            pool = aggregate_attributions_by_bucket(all_attributions, regime=None)
+            log.info(
+                f"  Attribution patterns for regime={regime}: pool-wide fallback "
+                f"({per_regime['n_strategies']} regime-specific < 3); "
+                f"{pool['n_strategies']} pool strategies, "
+                f"{len(pool['top_consistent_winners'])} winners, "
+                f"{len(pool['top_consistent_losers'])} losers"
+            )
+            return format_aggregate_for_generator(pool, regime)
+
         results = generate_batch(
             count=5,
             regimes=["trending", "ranging", "breakout", "all", "trending"],
@@ -458,6 +490,7 @@ def job_generate_strategies():
             existing_results=existing_results,
             reflector_insights=reflector_insights,
             get_failures_for_regime=failures_for,
+            get_attribution_for_regime=attribution_for,
             # R6 — let each candidate iterate up to 2 turns based on its own
             # mini-backtest result. Single-shot generation was producing too
             # many 0-trade strategies even with R3+R5 in place.

@@ -291,6 +291,182 @@ def format_attributions_for_reflector(
     return text
 
 
+def aggregate_attributions_by_bucket(
+    rows: list[dict],
+    regime: str | None = None,
+    min_strategies: int = 2,
+) -> dict:
+    """Roll multiple per-strategy attributions up into bucket-wise stats.
+
+    The reflector reads per-strategy attribution one row at a time; the
+    generator wants the cross-strategy view — "fgi_fear was a top winner
+    in 4/6 recent ranging strategies". That's much sharper signal for
+    the LLM building the NEXT strategy than five individual data blobs.
+
+    Filtering:
+      regime=None        consider every row
+      regime="ranging"   keep only rows whose target_regime is "ranging"
+
+      Strict — we don't widen 'ranging' to include target_regime='all'.
+      A target='all' strategy's wins aren't specifically attributable to
+      ranging conditions, so mixing it in would muddy per-regime guidance.
+      Caller is expected to fall back to the pool-wide aggregate when
+      a regime is thin (use regime=None for that).
+
+    Per-bucket fields:
+      appears_positive   strategies where the bucket landed in top_positive_lift
+      appears_negative   strategies where it landed in top_negative_lift
+      n_with_data        strategies where the bucket had ANY data at all
+                         (i.e. trades occurred in that bucket)
+      avg_lift           mean lift across the n_with_data strategies
+
+    Buckets with fewer than `min_strategies` appearances are excluded
+    from top-N ranking so we don't promote single-strategy quirks as
+    "consistent patterns".
+
+    Returns:
+      {
+        "n_strategies": int,             # number of rows that contributed
+        "regime": str|None,              # filter that was applied
+        "buckets": {name: {...}},
+        "top_consistent_winners": [name, ...],  # net positive, sorted
+        "top_consistent_losers":  [name, ...],
+      }
+    """
+    if regime is not None and regime != "all":
+        rows = [r for r in rows if r.get("target_regime") == regime]
+
+    if not rows:
+        return {
+            "n_strategies": 0, "regime": regime, "buckets": {},
+            "top_consistent_winners": [], "top_consistent_losers": [],
+        }
+
+    # bucket name → running aggregation
+    agg: dict = {}
+    for row in rows:
+        attr = row.get("attribution", {})
+        pos = set(attr.get("top_positive_lift", []))
+        neg = set(attr.get("top_negative_lift", []))
+        buckets = attr.get("buckets", {})
+
+        # Use the union of (top-listed buckets) ∪ (buckets-with-data) so
+        # both contribute to aggregates correctly.
+        for name in pos | neg | set(buckets.keys()):
+            a = agg.setdefault(
+                name,
+                {"appears_positive": 0, "appears_negative": 0,
+                 "n_with_data": 0, "_lift_sum": 0.0},
+            )
+            if name in pos:
+                a["appears_positive"] += 1
+            if name in neg:
+                a["appears_negative"] += 1
+            if name in buckets:
+                a["n_with_data"] += 1
+                a["_lift_sum"] += buckets[name].get("lift", 0.0)
+
+    # Finalize: compute avg_lift and drop the running sum
+    for name, a in agg.items():
+        a["avg_lift"] = round(a["_lift_sum"] / a["n_with_data"], 3) if a["n_with_data"] else 0.0
+        del a["_lift_sum"]
+
+    # Rank — winners need NET positive appearances AND positive avg lift,
+    # losers need NET negative appearances AND negative avg lift. The
+    # double-condition keeps a bucket that lifts +0.01 in 3 strategies and
+    # -0.10 in 2 strategies out of the winners list.
+    def _net(b):
+        return b["appears_positive"] - b["appears_negative"]
+
+    winners = [
+        (name, b) for name, b in agg.items()
+        if _net(b) > 0 and b["avg_lift"] > 0
+        and (b["appears_positive"] + b["appears_negative"]) >= min_strategies
+    ]
+    losers = [
+        (name, b) for name, b in agg.items()
+        if _net(b) < 0 and b["avg_lift"] < 0
+        and (b["appears_positive"] + b["appears_negative"]) >= min_strategies
+    ]
+    winners.sort(key=lambda x: (-_net(x[1]), -x[1]["avg_lift"]))
+    losers.sort(key=lambda x: (_net(x[1]), x[1]["avg_lift"]))
+
+    return {
+        "n_strategies": len(rows),
+        "regime": regime,
+        "buckets": agg,
+        "top_consistent_winners": [n for n, _ in winners[:5]],
+        "top_consistent_losers": [n for n, _ in losers[:5]],
+    }
+
+
+def format_aggregate_for_generator(
+    agg: dict,
+    target_regime: str,
+    max_chars: int = 1200,
+) -> str:
+    """Render an aggregated-attribution dict as a generator prompt section.
+
+    Returns "" when the aggregate has no strategies or no rankable buckets —
+    callers can unconditionally drop the result into the prompt.
+
+    `target_regime` is what the generator is being asked to build; we use
+    it to caption the section and to flag when we fell back to pool-wide
+    data (agg["regime"] != target_regime).
+    """
+    n = agg.get("n_strategies", 0)
+    if n == 0:
+        return ""
+
+    winners = agg.get("top_consistent_winners", [])
+    losers = agg.get("top_consistent_losers", [])
+    if not winners and not losers:
+        return ""
+
+    scope = agg.get("regime")
+    if scope is None or scope == "all" or scope != target_regime:
+        scope_label = f"pool-wide; insufficient {target_regime!r}-regime data" \
+            if target_regime not in (None, "all", scope) else "pool-wide across regimes"
+    else:
+        scope_label = f"{scope}-regime strategies"
+
+    lines = [
+        f"HISTORICAL ATTRIBUTION PATTERNS ({n} prior strategies, {scope_label}):",
+        "Macro buckets that empirically separated wins from losses in recent backtests.",
+    ]
+
+    if winners:
+        lines.append("\nConsistently favored WINS:")
+        for name in winners:
+            b = agg["buckets"][name]
+            net = b["appears_positive"] - b["appears_negative"]
+            lines.append(
+                f"  {name}: top-positive in {b['appears_positive']}/{n} strategies, "
+                f"net +{net}, avg lift {b['avg_lift']:+.2f}"
+            )
+
+    if losers:
+        lines.append("\nConsistently favored LOSSES:")
+        for name in losers:
+            b = agg["buckets"][name]
+            net = b["appears_negative"] - b["appears_positive"]
+            lines.append(
+                f"  {name}: top-negative in {b['appears_negative']}/{n} strategies, "
+                f"net +{net}, avg lift {b['avg_lift']:+.2f}"
+            )
+
+    lines.append(
+        "\nSTRONGLY consider gating entries to favor the winning conditions and "
+        "filter out the losing ones in your macro_confidence block. These came "
+        "from real trades, not priors."
+    )
+
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n[...truncated]"
+    return text
+
+
 def summarize_attribution(attr: dict) -> str:
     """Human-readable rendering for logs and the reflector prompt."""
     total = attr.get("total_trades", 0)
