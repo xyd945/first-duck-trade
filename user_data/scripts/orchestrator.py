@@ -513,26 +513,69 @@ def job_generate_strategies():
         log.error(f"Strategy generation failed: {e}", exc_info=True)
 
 
+def _find_btc_data_file() -> Path | None:
+    """Best-effort lookup of a BTC OHLCV feather file for buyhold + regime."""
+    candidates = [
+        DATA_DIR / "okx" / "BTC_USDT-1h.feather",
+        DATA_DIR / "okx" / "futures" / "BTC_USDT_USDT-1h-futures.feather",
+        DATA_DIR / "binance" / "BTC_USDT-1h.feather",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
 def job_backtest_candidates():
     """Weekly (after generation): backtest all uneval'd candidates.
 
-    Runs the 2-stage evaluation (mini-backtest then full) on each
-    candidate that doesn't have backtest results yet.
+    For each candidate:
+      1. Run full backtest
+      2. Run R7 pipeline gates (regime-conditional floor, beat-buy-and-hold,
+         optionally walk-forward) against the result
+      3. Promote only if all gates pass — otherwise retire with a gate-aware
+         verdict so the failure memory captures *which* gate killed it
     """
     log.info("=== Job: Backtest candidates ===")
     try:
         sys.path.insert(0, str(BASE_DIR / "scripts"))
         from strategy_registry import get_candidates, record_backtest, promote_strategy, retire_strategy
         from backtest_runner import run_backtest
+        from pipeline_gates import (
+            compute_regime_fractions, compute_btc_buyhold,
+            gate_regime_conditional_floor, gate_beat_buyhold,
+            gate_walk_forward, run_walk_forward,
+        )
 
         candidates = get_candidates()
         if not candidates:
             log.info("No candidates to backtest.")
             return
 
+        # R7: precompute reference data once per job run (shared across all
+        # candidates), not once per candidate. BTC feather + regime fractions
+        # only depend on the lookback window, not the strategy.
+        btc_path = _find_btc_data_file()
+        regime_fractions = None
+        if btc_path:
+            try:
+                import pandas as pd
+                btc_df = pd.read_feather(btc_path)
+                regime_fractions = compute_regime_fractions(btc_df, lookback_days=180)
+                log.info(f"  Regime fractions (180d): {regime_fractions}")
+            except Exception as e:
+                log.warning(f"  Regime fraction computation failed: {e}")
+
+        # Walk-forward is expensive (N× backtest). Opt-in via env var to keep
+        # the weekly cycle bounded. Default: off.
+        enable_wf = os.environ.get("R7_WALK_FORWARD", "").lower() in ("1", "true", "yes")
+        wf_splits = int(os.environ.get("R7_WF_SPLITS", "3"))
+        wf_days = int(os.environ.get("R7_WF_DAYS", "60"))
+
         for cand in candidates[:10]:  # Cap at 10 per run to limit compute
             name = cand["name"]
-            log.info(f"  Backtesting: {name}")
+            target_regime = cand.get("target_regime", "all")
+            log.info(f"  Backtesting: {name} (regime={target_regime})")
 
             try:
                 result = run_backtest(
@@ -551,33 +594,79 @@ def job_backtest_candidates():
                     )
                     continue
 
-                # Record results
+                # Record results before running gates so we always have the
+                # full-backtest row even if a gate later fails.
                 record_backtest(cand["id"], result)
 
                 total_trades = result.get("total_trades", 0)
                 profit_pct = result.get("profit_total_pct", 0)
                 sharpe = result.get("sharpe", 0)
-
                 log.info(f"  {name}: {total_trades} trades, {profit_pct}% profit, Sharpe={sharpe}")
 
-                # Auto-promote if profitable with decent trade count
-                if total_trades >= 20 and profit_pct > 0 and sharpe > 0:
+                # R7 gates
+                gate_verdicts = []
+                if regime_fractions is not None:
+                    v = gate_regime_conditional_floor(
+                        result, target_regime, regime_fractions, base_min_trades=20,
+                    )
+                    gate_verdicts.append(v)
+                    log.info(f"  {name} [regime]: {v['verdict']} — {v['reason']}")
+
+                if btc_path:
+                    bh = compute_btc_buyhold(btc_path, timerange=result.get("timerange"))
+                    v = gate_beat_buyhold(result, bh)
+                    gate_verdicts.append(v)
+                    log.info(f"  {name} [buyhold]: {v['verdict']} — {v['reason']}")
+
+                if enable_wf:
+                    log.info(f"  {name} [walk-forward]: running {wf_splits} windows × {wf_days}d…")
+                    wf_results = run_walk_forward(
+                        name,
+                        backtest_fn=lambda n, tr: run_backtest(
+                            strategy_name=n, timerange=tr,
+                            use_sandbox=True, timeout_seconds=600,
+                        ),
+                        n_splits=wf_splits, days_per_split=wf_days,
+                    )
+                    v = gate_walk_forward(wf_results)
+                    gate_verdicts.append(v)
+                    log.info(f"  {name} [walk-forward]: {v['verdict']} — {v['reason']}")
+
+                # Promotion = baseline profitability AND every gate passes.
+                # We still keep the legacy baseline because gates can skip
+                # (when reference data is missing) and we don't want a
+                # universally-skipping chain to auto-promote losers.
+                baseline_ok = total_trades >= 20 and profit_pct > 0 and sharpe > 0
+                all_gates_passed = all(v["passed"] for v in gate_verdicts)
+
+                if baseline_ok and all_gates_passed:
                     promote_strategy(cand["id"])
-                    log.info(f"  {name}: AUTO-PROMOTED (profitable, Sharpe > 0)")
-                elif total_trades < 5:
+                    log.info(f"  {name}: AUTO-PROMOTED (baseline + {len(gate_verdicts)} gates)")
+                elif not baseline_ok and total_trades < 5:
                     retire_strategy(
                         cand["id"],
                         reason=f"Too few trades: {total_trades} (profit={profit_pct}%, sharpe={sharpe})",
                         verdict="FAIL_TOO_FEW",
                     )
                     log.info(f"  {name}: RETIRED (too few trades)")
-                elif profit_pct <= 0 or sharpe <= 0:
+                elif not baseline_ok:
                     retire_strategy(
                         cand["id"],
                         reason=f"Unprofitable: {total_trades} trades, {profit_pct}% profit, sharpe={sharpe}",
                         verdict="FAIL_UNPROFITABLE",
                     )
                     log.info(f"  {name}: RETIRED (unprofitable)")
+                else:
+                    # Profitable on baseline but a gate blocked. Tag with the
+                    # first failing gate's verdict so the failure memory has
+                    # a specific reason ("FAIL_BH" reads better than a vague
+                    # FAIL_UNPROFITABLE for a strategy that did make money
+                    # but lost to HODL).
+                    failed = next((v for v in gate_verdicts if not v["passed"]), None)
+                    verdict = failed["verdict"] if failed else "FAIL_GATES"
+                    reason = failed["reason"] if failed else "blocked by gates"
+                    retire_strategy(cand["id"], reason=reason, verdict=verdict)
+                    log.info(f"  {name}: RETIRED ({verdict}: {reason})")
 
             except Exception as e:
                 log.warning(f"  {name}: error — {e}")
