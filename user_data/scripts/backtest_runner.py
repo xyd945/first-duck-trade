@@ -334,20 +334,197 @@ def evaluate_candidate(strategy_name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Hyperopt — parameter search via Freqtrade's IHyperOptLoss
+# ---------------------------------------------------------------------------
+
+def run_hyperopt(
+    strategy_name: str,
+    timeframe: str = "1h",
+    timerange: str = None,
+    epochs: int = 50,
+    spaces: tuple = ("buy", "sell"),
+    loss: str = "SampleHyperOptLoss",
+    config_path: str = None,
+    use_sandbox: bool = True,
+    timeout_seconds: int = 1800,
+) -> dict:
+    """Run Freqtrade hyperopt via Docker and return parsed best-epoch results.
+
+    Mirror of run_backtest but for parameter search. The strategy must already
+    use IntParameter/DecimalParameter etc. — base_generated.py enforces this
+    in generated strategies. Hyperopt writes its result file to
+    user_data/hyperopt_results/ and also auto-loads the best params on the
+    NEXT backtest run of the same strategy (via the <StrategyName>.json
+    Freqtrade auto-discovers next to the .py file when --hyperopt-export is on).
+
+    Returns a dict with the same shape as run_backtest plus:
+      - best_epoch: int               which epoch won
+      - total_epochs: int             how many were actually run
+      - params: dict                  best-epoch buy/sell/roi/stoploss params
+      - loss: float                   loss function value at best epoch
+    """
+    if config_path is None:
+        config_path = "/freqtrade/user_data/config.json"
+
+    compose_file = str(PROJECT_ROOT / "docker-compose.yml")
+    cmd = ["docker", "compose",
+           "-f", compose_file,
+           "--project-directory", HOST_PROJECT_DIR]
+    if use_sandbox:
+        cmd.extend(["--profile", "backtest"])
+    cmd.extend(["run", "--rm"])
+    cmd.append("freqtrade-backtest" if use_sandbox else "freqtrade-sweep")
+
+    cmd.extend([
+        "hyperopt",
+        "--strategy", strategy_name,
+        "--strategy-path", "/freqtrade/user_data/strategies/candidates",
+        "--hyperopt-path", "/freqtrade/user_data/hyperopts",
+        "--hyperopt-loss", loss,
+        "--spaces", *spaces,
+        "--epochs", str(epochs),
+        "--timeframe", timeframe,
+        "--config", config_path,
+        # auto-write <StrategyName>.json next to the .py file so the next
+        # backtest run picks up the optimized params transparently
+        "--print-json",
+    ])
+    if timerange:
+        cmd.extend(["--timerange", timerange])
+
+    log.info(f"Running hyperopt ({epochs} epochs): {' '.join(cmd)}")
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            cwd=str(PROJECT_ROOT),
+        )
+        output = proc.stdout + proc.stderr
+        last_lines = "\n".join(output.strip().split("\n")[-100:])
+
+        if proc.returncode != 0:
+            return {
+                "success": False,
+                "strategy": strategy_name,
+                "error": f"Hyperopt exited with code {proc.returncode}",
+                "raw_output": last_lines,
+            }
+
+        return parse_hyperopt_output(output, strategy_name, timerange, epochs)
+
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "strategy": strategy_name,
+            "error": f"Hyperopt timed out after {timeout_seconds}s",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "strategy": strategy_name,
+            "error": str(e),
+        }
+
+
+def parse_hyperopt_output(
+    output: str, strategy_name: str, timerange: str = None, epochs: int = 0
+) -> dict:
+    """Extract best-epoch metrics + params from Freqtrade hyperopt stdout.
+
+    Freqtrade's --print-json flag emits a one-line JSON block with the best
+    epoch's params — that's the most reliable thing to parse. Per-epoch
+    summary numbers are parsed from the conventional "Best result" section.
+
+    Returns the same dict shape as parse_backtest_output, plus best_epoch,
+    total_epochs, params, loss.
+    """
+    import re
+
+    result = {
+        "success": True,
+        "strategy": strategy_name,
+        "timerange": timerange or "",
+        "total_epochs": epochs,
+        "raw_output": "\n".join(output.strip().split("\n")[-100:]),
+    }
+
+    # --print-json emits a single-line JSON payload of the winning params.
+    # Format: { "params": {...}, "minimal_roi": {...}, "stoploss": ... }
+    # Scan lines instead of regex — nested braces don't matter line-by-line.
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{") or '"params"' not in stripped:
+            continue
+        try:
+            result["params"] = json.loads(stripped)
+            break
+        except json.JSONDecodeError:
+            continue
+    else:
+        log.debug("No --print-json payload found in hyperopt output.")
+
+    # "Best result was reached in epoch N/T"
+    best_match = re.search(
+        r"Best result.*?epoch\s+(\d+)\s*/\s*(\d+)", output, re.IGNORECASE | re.DOTALL
+    )
+    if best_match:
+        result["best_epoch"] = int(best_match.group(1))
+        result["total_epochs"] = int(best_match.group(2))
+
+    # Common per-epoch metrics — same regex shapes as backtest output
+    for key, pattern in [
+        ("total_trades", r"(\d+)\s+trades"),
+        ("profit_total_pct", r"Total profit.*?([-\d.]+)\s*%"),
+        ("sharpe", r"Sharpe:\s*([-\d.]+)"),
+        ("sortino", r"Sortino:\s*([-\d.]+)"),
+        ("profit_factor", r"Profit factor:\s*([-\d.]+)"),
+        ("max_drawdown_pct", r"(?:Max\s+)?[Dd]rawdown.*?([-\d.]+)\s*%"),
+        ("loss", r"\bLoss:\s*([-\d.]+)"),
+    ]:
+        m = re.search(pattern, output)
+        if m:
+            val = m.group(1)
+            try:
+                result[key] = float(val) if "." in val or key in ("sharpe", "sortino", "profit_total_pct", "max_drawdown_pct", "profit_factor", "loss") else int(val)
+            except ValueError:
+                pass
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     import argparse
-    parser = argparse.ArgumentParser(description="Run Freqtrade backtests")
+    parser = argparse.ArgumentParser(description="Run Freqtrade backtests or hyperopt")
     parser.add_argument("strategy", help="Strategy class name")
     parser.add_argument("--mini", action="store_true", help="Run mini-backtest only (30 days)")
     parser.add_argument("--full", action="store_true", help="Run full backtest only (6 months)")
     parser.add_argument("--evaluate", action="store_true", help="Run full 2-stage evaluation")
+    parser.add_argument("--hyperopt", action="store_true", help="Run hyperopt parameter search")
+    parser.add_argument("--epochs", type=int, default=50, help="Hyperopt epochs (default 50)")
+    parser.add_argument(
+        "--timerange",
+        default=None,
+        help="Freqtrade timerange (e.g. 20251101-20260501). "
+             "Defaults to last ~6 months for hyperopt.",
+    )
     args = parser.parse_args()
 
-    if args.evaluate:
+    if args.hyperopt:
+        timerange = args.timerange
+        if timerange is None:
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(days=180)
+            timerange = f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+        result = run_hyperopt(args.strategy, timerange=timerange, epochs=args.epochs)
+    elif args.evaluate:
         result = evaluate_candidate(args.strategy)
     elif args.mini:
         result = run_mini_backtest(args.strategy)
