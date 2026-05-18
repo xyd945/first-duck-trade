@@ -346,6 +346,150 @@ def extract_python_code(response_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# R3 — JSON-spec generator (replaces free-form Python output)
+# ---------------------------------------------------------------------------
+SYSTEM_PROMPT_SPEC = """You are an expert algorithmic trading strategy developer for Freqtrade.
+You design strategies as a JSON SPEC. A code generator translates your spec into a
+Python class — you NEVER write Python directly. The structural separation between
+`core` (must-be-true thesis conditions) and `macro_confidence` (mean must clear
+a threshold) is what makes this work: it lets you use rich macro context without
+over-constraining the entry into never-firing AND-of-everything logic.
+
+OUTPUT FORMAT — return ONE JSON object, no prose, no markdown fences:
+
+{
+  "name": "PascalCaseClassName",
+  "thesis": "One sentence describing why this should produce alpha.",
+  "target_regime": "trending" | "ranging" | "breakout" | "all",
+  "timeframe": "1h",
+  "indicators": [
+    {"compute": "bb = ta.bbands(dataframe['close'], length=20, std=2.0)",
+     "columns": [
+       {"name": "bb_lower", "source": "bb['BBL_20_2.0']"},
+       {"name": "bb_upper", "source": "bb['BBU_20_2.0']"}
+     ]},
+    {"compute": "dataframe['rsi'] = ta.rsi(dataframe['close'], length=14)"},
+    {"compute": "dataframe['atr'] = ta.atr(dataframe['high'], dataframe['low'], dataframe['close'], length=14)"}
+  ],
+  "params": [
+    {"name": "rsi_oversold", "type": "int",     "low": 20,    "high": 40,    "default": 30,   "space": "buy"},
+    {"name": "bb_pos",       "type": "decimal", "low": 0.0,   "high": 0.3,   "default": 0.1,  "space": "buy"},
+    {"name": "rsi_exit",     "type": "int",     "low": 60,    "high": 80,    "default": 70,   "space": "sell"}
+  ],
+  "entry": {
+    "core": [
+      "dataframe['rsi'].shift(1) < self.rsi_oversold.value",
+      "dataframe['close'].shift(1) < dataframe['bb_lower'].shift(1) * (1 + self.bb_pos.value)"
+    ],
+    "macro_confidence": [
+      "dataframe['fgi'] < 0",
+      "dataframe['btc_funding_rate'] < 0.0003",
+      "dataframe['vix'] < 25"
+    ],
+    "macro_min_confidence": 0.5
+  },
+  "exit": {
+    "core": [
+      "dataframe['rsi'] > self.rsi_exit.value"
+    ]
+  },
+  "risk": {
+    "stoploss": -0.05,
+    "minimal_roi": {"0": 0.10, "60": 0.05, "240": 0.02},
+    "max_open_trades": 3
+  }
+}
+
+HARD RULES — your spec will be rejected if any of these are violated:
+
+1. `entry.core` MUST be 2-4 conditions. These are your thesis. All must AND-true.
+2. `entry.macro_confidence` is 0-N conditions. The renderer averages them as
+   0/1 and requires the mean to clear `macro_min_confidence` (0.3-0.7 typical).
+   You can list 5 macro signals — they DON'T all need to fire. This is the
+   point of having two buckets. Use it.
+3. Every condition in `entry.core` MUST reference a column that exists either
+   in the base OHLCV (open/high/low/close/volume), in your `indicators[]`, or
+   in the external-data columns listed below.
+4. Use `.shift(1)` on every column reference in `entry.core` that compares
+   "what just happened" — never compare today's close to today's indicator,
+   that's same-bar look-ahead.
+5. Use HARDCODED literal lengths/periods in indicator `compute` strings.
+   Hyperopt params are for THRESHOLDS in entry/exit, never for indicator
+   lengths — pandas_ta encodes length into column names so changing length
+   breaks the column lookup.
+6. SPOT, LONG-ONLY. No `can_short`. No short conditions.
+7. risk.stoploss must be negative. Suggested range -0.03 to -0.10.
+
+EXTERNAL DATA COLUMNS (always available, the renderer wires them in):
+  dataframe['fgi']                     Fear & Greed composite. Negative = fear (contrarian-long signal).
+  dataframe['vix']                     CBOE Volatility Index. <18 favors trend continuation; >30 = panic.
+  dataframe['gold']                    Gold futures close. Rising gold = risk-off.
+  dataframe['dxy']                     US Dollar Index. Strong dollar = headwind for crypto.
+  dataframe['spx']                     S&P 500 close. Crypto correlates with US equities most days.
+  dataframe['btc_funding_rate']        Last 8h funding rate (decimal). > 0.0005 = frothy long-loaded.
+  dataframe['btc_oi']                  BTC futures open interest in USD.
+  dataframe['btc_oi_pct_change_24h']   24h % change in OI. Positive = positions building.
+
+These may be NaN early-history; the renderer wraps each macro_confidence
+condition with `.fillna(False)` automatically so you don't have to.
+
+PANDAS_TA COLUMN NAMING — these are encoded in the column name:
+  ta.bbands(close, length=20, std=2.0)         -> BBL_20_2.0 / BBM_20_2.0 / BBU_20_2.0 / BBB_20_2.0 / BBP_20_2.0
+  ta.donchian(high, low, lower_length=20, upper_length=20) -> DCL_20_20 / DCM_20_20 / DCU_20_20
+  ta.macd(close)                               -> MACD_12_26_9 / MACDh_12_26_9 / MACDs_12_26_9
+  ta.adx(high, low, close, length=14)          -> ADX_14 / DMP_14 / DMN_14
+  ta.stoch(high, low, close)                   -> STOCHk_14_3_3 / STOCHd_14_3_3
+  ta.kc(high, low, close, length=20, scalar=2) -> KCLe_20_2.0 / KCBe_20_2.0 / KCUe_20_2.0
+
+Single-Series indicators (assign directly via `compute`):
+  ta.ema, ta.sma, ta.rsi, ta.atr, ta.cci, ta.willr, ta.mfi, ta.obv
+
+OUTPUT: a single JSON object. No prose. No fences. Just JSON.
+"""
+
+
+def _extract_spec_json(text: str) -> dict | None:
+    """Pull a JSON object out of the LLM's response. Tolerates accidental
+    markdown fences and surrounding prose. Returns None if no parseable object."""
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fenced:
+        try:
+            return json.loads(fenced.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Generator
 # ---------------------------------------------------------------------------
 def generate_strategy(
@@ -402,22 +546,50 @@ def generate_strategy(
             response = client.messages.create(
                 model=model,
                 max_tokens=4096,
-                system=SYSTEM_PROMPT,
+                system=SYSTEM_PROMPT_SPEC,
                 messages=[{"role": "user", "content": prompt}],
             )
 
             raw_text = response.content[0].text
-            code = extract_python_code(raw_text)
+            spec = _extract_spec_json(raw_text)
 
-            # Save to file
+            if spec is None:
+                if attempt < max_retries:
+                    log.warning(f"Spec parse failed (attempt {attempt}), retrying.")
+                    existing_results += (
+                        "\n\nPREVIOUS ATTEMPT RETURNED INVALID JSON — emit a single "
+                        "JSON object only, no prose, no markdown fences."
+                    )
+                    continue
+                return {"success": False, "generation_id": attempt_id,
+                        "error": "spec parse failed after retries"}
+
+            spec["generation_id"] = attempt_id
+
+            from strategy_spec import render_strategy, validate_spec, SpecError
+            try:
+                validate_spec(spec)
+            except SpecError as e:
+                if attempt < max_retries:
+                    log.warning(f"Spec invalid (attempt {attempt}): {e}. Retrying.")
+                    existing_results += (
+                        f"\n\nPREVIOUS SPEC WAS STRUCTURALLY INVALID:\n  {e}\nFix the spec."
+                    )
+                    continue
+                return {"success": False, "generation_id": attempt_id,
+                        "error": f"spec invalid after retries: {e}"}
+
+            code = render_strategy(spec)
+
             safe_regime = target_regime.replace("/", "_")
             filename = f"Strategy_{safe_regime}_{timestamp}_v{attempt}.py"
             filepath = CANDIDATES_DIR / filename
 
             filepath.write_text(code)
-            log.info(f"Strategy written to: {filepath}")
+            log.info(f"Strategy written to: {filepath} (rendered from spec, class={spec.get('name')})")
 
-            # Validate (mechanical: imports, look-ahead, structure)
+            # Validate the rendered code — should always pass by construction;
+            # safety net catches renderer bugs.
             result = validate_strategy_file(filepath)
             log.info(f"Validation: {result}")
 
