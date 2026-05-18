@@ -11,8 +11,9 @@ user_data/data/
 # Backtest results
 user_data/backtest_results/
 
-# Hyperopt results
+# Hyperopt results + runtime lock file
 user_data/hyperopt_results/
+user_data/hyperopt.lock
 
 # Plot dataframe results
 user_data/plot/
