@@ -88,6 +88,8 @@ services:
       - "/var/run/docker.sock:/var/run/docker.sock"  # Docker socket for container management
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
       - ORCHESTRATOR_MODE=${ORCHESTRATOR_MODE:-dry-run}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}

@@ -81,44 +81,66 @@ Specific things to flag as HIGH severity:
    that was computed using today's high.
 
 5. THRESHOLD SANITY
-   RSI compared to a value outside 0-100, %B compared outside 0-1, fgi against
-   values outside roughly -50 to +50, funding rate against values outside
-   -0.005 to +0.005 (50bp / 8h is already extreme).
+   RSI compared to a value outside 0-100, %B compared outside 0-1, funding
+   rate against values outside -0.005 to +0.005 (50bp / 8h is already extreme).
+
+   IMPORTANT — fgi is project-specific, NOT the public 0-100 Alternative.me
+   index. Empirical range on real data: roughly -22 to +45, median ~5, std ~12.
+   - fgi < 0     fires ~45% of days   (NOT "always false" — common valid filter)
+   - fgi < -10   fires ~10% of days   (strong fear, sharp contrarian signal)
+   - fgi > 20    fires ~10% of days   (strong greed)
+   - fgi < -50, fgi > 50, fgi > 70, fgi < 0 || > 100 — ANY threshold treating
+     fgi as 0-100 IS the bug; flag it as such. But never flag fgi < 0,
+     fgi < -10, or fgi > 20 as impossible — those are correct usage.
 
 You output ONLY the JSON object. No prose, no markdown fences."""
 
 
-def critic_review(code: str, model: str = "claude-sonnet-4-20250514") -> dict:
+def critic_review(
+    code: str,
+    model: str | None = None,
+    provider: str | None = None,
+) -> dict:
     """Run the critic on a strategy source string. Returns the parsed JSON.
+
+    `model` / `provider` are forwarded to llm_client.chat_completion. When None,
+    the env-driven defaults apply (same as the generator).
 
     On any error (no API key, transport failure, malformed response), returns
     a synthetic PASS verdict with `error` set — the generator MUST treat critic
     failures as non-blocking. We never want the critic itself to halt the
     pipeline; its job is to add signal, not gate.
     """
-    try:
-        import anthropic
-    except ImportError:
-        return {"verdict": "PASS", "summary": "critic skipped (anthropic SDK missing)", "issues": [], "error": "anthropic_not_installed"}
+    # Lazy import — keeps llm_client out of test paths that fully mock the
+    # critic. Importing here also ensures we pick up monkeypatched modules.
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from llm_client import chat_completion
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return {"verdict": "PASS", "summary": "critic skipped (no API key)", "issues": [], "error": "missing_api_key"}
-
-    client = anthropic.Anthropic(api_key=api_key)
     user_prompt = f"Review this Freqtrade strategy:\n\n```python\n{code}\n```"
 
     try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system=CRITIC_SYSTEM_PROMPT,
+        # 4096 because reasoning-capable models (DeepSeek V4 Pro) burn a
+        # non-deterministic 30-300 tokens on internal reasoning_content
+        # BEFORE emitting the visible JSON. 2048 worked most of the time
+        # but live trials caught occasional truncation mid-reasoning,
+        # leaving no JSON in the output and a synthetic-PASS fallback that
+        # silently strips the critic's value. 4096 gives comfortable
+        # headroom for ~500 tokens of reasoning + a verbose REJECT verdict
+        # with several issues.
+        text = chat_completion(
             messages=[{"role": "user", "content": user_prompt}],
+            system=CRITIC_SYSTEM_PROMPT,
+            model=model,
+            max_tokens=4096,
+            provider=provider,
         )
-        text = response.content[0].text
     except Exception as e:
         log.warning(f"Critic API call failed: {e}")
-        return {"verdict": "PASS", "summary": f"critic skipped (api error: {e})", "issues": [], "error": str(e)}
+        return {"verdict": "PASS",
+                "summary": f"critic skipped (api error: {e})",
+                "issues": [], "error": str(e)}
 
     return _parse_verdict_json(text)
 

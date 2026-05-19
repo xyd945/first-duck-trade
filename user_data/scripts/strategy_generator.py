@@ -56,10 +56,17 @@ CRITICAL RULES:
     This injects macro context the strategy is encouraged (not required) to use.
 
 EXTERNAL DATA (available via add_external_data — already shifted +1 day to avoid look-ahead):
-  dataframe['fgi']    Fear & Greed composite (PMACD + RoR + Money Flow + VIX + Gold).
-                      Negative = Fear (extreme oversold macro), Positive = Greed.
-                      Useful as a contrarian filter (e.g. only long when fgi < -10
-                      = market is fearful = better risk/reward for longs).
+  dataframe['fgi']    PROJECT-SPECIFIC composite (NOT the public 0-100
+                      Alternative.me Fear & Greed Index). Empirical range on
+                      our data is roughly -22 to +45, median ~5, std ~12.
+                      Negative = Fear (oversold macro, contrarian-long signal),
+                      Positive = Greed.
+                      Useful thresholds (empirical, ~10% of days fall here):
+                        fgi < -10   strong fear  (good contrarian long entry)
+                        fgi > +20   strong greed (caution on momentum entries)
+                      DO NOT compare against 50, 70, or any 0-100 scale — those
+                      thresholds will silently never (or always) fire and ruin
+                      the strategy. fgi < 0 fires roughly 45% of days.
   dataframe['vix']    CBOE Volatility Index daily close. High vix = panic.
                       Low vix (under ~18) historically favors trend continuation.
   dataframe['gold']   Gold futures close. Rising gold often means risk-off.
@@ -533,14 +540,19 @@ def generate_strategy(
     target_regime: str = "all",
     context: str = "",
     existing_results: str = "",
-    model: str = "claude-sonnet-4-20250514",
+    model: str | None = None,
     max_retries: int = 1,
     reflector_insights: str = "",
     failure_examples: str = "",
     attribution_patterns: str = "",
+    provider: str | None = None,
 ) -> dict:
     """
-    Generate a new strategy using Claude API.
+    Generate a new strategy via the LLM.
+
+    `model` / `provider` are forwarded to llm_client.chat_completion. When
+    None, the env-driven defaults apply (LLM_PROVIDER, then that provider's
+    default model — see PROVIDER_DEFAULTS in llm_client.py).
 
     Returns dict with:
       - success: bool
@@ -549,23 +561,15 @@ def generate_strategy(
       - generation_id: str
       - error: str (if failed)
     """
-    try:
-        import anthropic
-    except ImportError:
-        return {"success": False, "error": "anthropic package not installed"}
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return {"success": False, "error": "ANTHROPIC_API_KEY not set"}
-
-    # Import validation pipeline
+    # Import validation pipeline + the LLM wrapper. llm_client lazily imports
+    # the SDKs it needs, so a missing anthropic install only matters if the
+    # caller actually selects the anthropic provider.
     sys.path.insert(0, str(BASE_DIR / "scripts"))
     from validation_pipeline import validate_strategy_file
+    from llm_client import chat_completion
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     generation_id = f"gen-{timestamp}"
-
-    client = anthropic.Anthropic(api_key=api_key)
 
     for attempt in range(max_retries + 1):
         attempt_id = f"{generation_id}-v{attempt}"
@@ -582,14 +586,13 @@ def generate_strategy(
         )
 
         try:
-            response = client.messages.create(
+            raw_text = chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                system=SYSTEM_PROMPT_SPEC,
                 model=model,
                 max_tokens=4096,
-                system=SYSTEM_PROMPT_SPEC,
-                messages=[{"role": "user", "content": prompt}],
+                provider=provider,
             )
-
-            raw_text = response.content[0].text
             spec = _extract_spec_json(raw_text)
 
             if spec is None:
@@ -654,8 +657,10 @@ def generate_strategy(
 
             # Critic pass (judgment review: over-constrained logic, NaN guards,
             # regime/logic mismatch). Always non-blocking on its own errors.
+            # Critic uses the same provider/model as the generator by default —
+            # passing model=None lets llm_client pick the provider default.
             from strategy_critic import critic_review, format_critic_feedback
-            critic = critic_review(code, model=model)
+            critic = critic_review(code, model=model, provider=provider)
             verdict = critic.get("verdict", "PASS")
             log.info(f"Critic verdict: {verdict} — {critic.get('summary', '')}")
 
@@ -748,7 +753,8 @@ def generate_and_iterate(
     reflector_insights: str = "",
     failure_examples: str = "",
     attribution_patterns: str = "",
-    model: str = "claude-sonnet-4-20250514",
+    model: str | None = None,
+    provider: str | None = None,
     max_turns: int = 3,
     accept_min_trades: int = 5,
     backtest_fn=None,
@@ -797,6 +803,7 @@ def generate_and_iterate(
             failure_examples=failure_examples,
             attribution_patterns=attribution_patterns,
             model=model,
+            provider=provider,
         )
         if not gen.get("success"):
             # generate_strategy itself failed (spec parse, validation, etc.). Give up.
@@ -920,11 +927,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate trading strategies using LLM")
     parser.add_argument("--regime", default="all", help="Target regime")
     parser.add_argument("--count", type=int, default=1, help="Number of strategies to generate")
-    parser.add_argument("--model", default="claude-sonnet-4-20250514", help="Claude model to use")
+    parser.add_argument("--model", default=None,
+                        help="Override model ID; default per LLM provider in llm_client.py")
+    parser.add_argument("--provider", default=None,
+                        help="Override LLM provider (anthropic / deepseek); default from LLM_PROVIDER env")
     parser.add_argument(
         "--dry-prompt",
         action="store_true",
-        help="Print the assembled prompt using real registry data, without calling Claude",
+        help="Print the assembled prompt using real registry data, without calling the LLM",
     )
     parser.add_argument(
         "--failure-k", type=int, default=8,
@@ -960,7 +970,9 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args.count == 1:
-        result = generate_strategy(target_regime=args.regime, model=args.model)
+        result = generate_strategy(
+            target_regime=args.regime, model=args.model, provider=args.provider,
+        )
         print(json.dumps({k: str(v) for k, v in result.items()}, indent=2))
     else:
         results = generate_batch(count=args.count)
