@@ -484,9 +484,16 @@ def job_generate_strategies():
             )
             return format_aggregate_for_generator(pool, regime)
 
+        # Phase 6 — iterate the 20-cell coherence matrix instead of cycling
+        # 5 strategies through regimes. Each cell is one (archetype, regime)
+        # pair the spec validator enforces. Diversity is structural, not
+        # prompt-suggested.
+        from archetypes import coherence_matrix
+        cells = coherence_matrix()
+        log.info(f"  Coherence matrix: {len(cells)} (archetype, regime) cells to generate")
+
         results = generate_batch(
-            count=5,
-            regimes=["trending", "ranging", "breakout", "all", "trending"],
+            cells=cells,
             context=context,
             existing_results=existing_results,
             reflector_insights=reflector_insights,
@@ -512,7 +519,8 @@ def job_generate_strategies():
                     tree = ast.parse(source)
                     class_name = ""
                     thesis = ""
-                    target_regime = "all"
+                    target_regime = r.get("target_regime") or "all"
+                    archetype = r.get("archetype") or ""
                     for node in ast.walk(tree):
                         if isinstance(node, ast.ClassDef):
                             class_name = node.name
@@ -524,6 +532,8 @@ def job_generate_strategies():
                                                 thesis = item.value.value
                                             elif target.id == "TARGET_REGIME" and isinstance(item.value, ast.Constant):
                                                 target_regime = item.value.value
+                                            elif target.id == "STRATEGY_ARCHETYPE" and isinstance(item.value, ast.Constant):
+                                                archetype = item.value.value
                             break
 
                     if class_name:
@@ -540,8 +550,10 @@ def job_generate_strategies():
                             thesis=thesis,
                             target_regime=target_regime,
                             generation_id=gen_id,
+                            archetype=archetype,
                         )
-                        log.info(f"  Registered: {class_name} (regime={target_regime})")
+                        log.info(f"  Registered: {class_name} "
+                                 f"(archetype={archetype or 'legacy'}, regime={target_regime})")
                 except Exception as e:
                     log.warning(f"  Failed to register {filepath}: {e}")
 
@@ -1071,12 +1083,19 @@ def main():
     scheduler.add_job(job_llm_regime_override, "cron", hour=0, minute=12, id="llm_regime")
     scheduler.add_job(job_apply_regime, "cron", hour=0, minute=15, id="apply_regime")
 
-    # --- Weekly jobs: Strategy Factory Loop (Sundays at 02:00 UTC) ---
-    scheduler.add_job(job_generate_strategies, "cron", day_of_week="sun", hour=2, minute=0, id="generate_strategies")
-    scheduler.add_job(job_backtest_candidates, "cron", day_of_week="sun", hour=2, minute=30, id="backtest_candidates")
-    scheduler.add_job(job_reflector, "cron", day_of_week="sun", hour=3, minute=0, id="reflector")
-    # 04:00 buffer after reflector — hyperopt is the slow stage (up to ~30 min total)
-    scheduler.add_job(job_hyperopt_candidates, "cron", day_of_week="sun", hour=4, minute=0, id="hyperopt_candidates")
+    # --- Weekly jobs: Strategy Factory Loop ---
+    # Phase 6: generation moved Sun 02:00 → Sat 20:00 UTC to accommodate the
+    # 20-cell coherence matrix (≈3-4 hr generation + 20-30 min backtest at
+    # ~3 min/DeepSeek-call). Sunday 02:00 left only ~2 hours before daily
+    # macro fetch and risked timeline collision. Saturday 20:00 → Sunday 09:00
+    # gives a 13-hour runway.
+    scheduler.add_job(job_generate_strategies, "cron", day_of_week="sat", hour=20, minute=0, id="generate_strategies")
+    # Backtest fires at Sun 00:30 — gives generation up to 4.5 hours
+    scheduler.add_job(job_backtest_candidates, "cron", day_of_week="sun", hour=0, minute=30, id="backtest_candidates")
+    # Reflector at Sun 09:00 — backtests should be done by then
+    scheduler.add_job(job_reflector, "cron", day_of_week="sun", hour=9, minute=0, id="reflector")
+    # Hyperopt last — slowest stage, can run while we sleep
+    scheduler.add_job(job_hyperopt_candidates, "cron", day_of_week="sun", hour=12, minute=0, id="hyperopt_candidates")
 
     # --- Risk monitoring (every 5 minutes) ---
     scheduler.add_job(job_check_risk, "interval", minutes=5, id="check_risk")

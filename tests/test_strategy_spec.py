@@ -17,6 +17,8 @@ def _valid_spec(**overrides) -> dict:
     spec = {
         "name": "MyTestStrategy",
         "thesis": "Test thesis with \"quoted\" sections.",
+        # Phase 6 — archetype required. mean_reversion coheres with ranging.
+        "archetype": "mean_reversion",
         "target_regime": "ranging",
         "generation_id": "gen-test-v0",
         "timeframe": "1h",
@@ -252,3 +254,48 @@ def test_extract_spec_json_returns_none_on_garbage():
 def test_extract_spec_json_returns_none_on_unbalanced():
     from strategy_generator import _extract_spec_json
     assert _extract_spec_json('{"a": 1') is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — archetype field
+# ---------------------------------------------------------------------------
+
+def test_missing_archetype_raises():
+    from strategy_spec import validate_spec, SpecError
+    spec = _valid_spec()
+    spec.pop("archetype")
+    with pytest.raises(SpecError, match="missing required fields"):
+        validate_spec(spec)
+
+
+def test_invalid_archetype_raises():
+    from strategy_spec import validate_spec, SpecError
+    spec = _valid_spec(archetype="not_a_real_archetype")
+    with pytest.raises(SpecError, match="archetype must be one of"):
+        validate_spec(spec)
+
+
+def test_incoherent_archetype_regime_pair_raises():
+    """mean_reversion + trending is a category error (catching falling knives).
+    Spec validator must reject it before render."""
+    from strategy_spec import validate_spec, SpecError
+    spec = _valid_spec(archetype="mean_reversion", target_regime="trending")
+    with pytest.raises(SpecError, match="does not cohere"):
+        validate_spec(spec)
+
+
+def test_coherent_archetype_regime_pair_accepted():
+    from strategy_spec import validate_spec
+    spec = _valid_spec(archetype="momentum_continuation", target_regime="trending")
+    validate_spec(spec)  # should not raise
+
+
+def test_render_emits_strategy_archetype_class_attr():
+    """The renderer's STRATEGY_ARCHETYPE class attr lets the orchestrator
+    recover the archetype by parsing the file (defense in depth — the
+    primary signal is from generate_batch's stamped result dict)."""
+    from strategy_spec import render_strategy
+    spec = _valid_spec(archetype="vol_squeeze", target_regime="breakout")
+    code = render_strategy(spec)
+    assert 'STRATEGY_ARCHETYPE = "vol_squeeze"' in code
+    assert 'TARGET_REGIME = "breakout"' in code

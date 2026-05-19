@@ -32,7 +32,7 @@ log = logging.getLogger("strategy_spec")
 
 
 REQUIRED_FIELDS = (
-    "name", "thesis", "target_regime", "indicators", "params",
+    "name", "thesis", "archetype", "target_regime", "indicators", "params",
     "entry", "exit", "risk",
 )
 
@@ -56,6 +56,21 @@ def validate_spec(spec: dict) -> None:
 
     if spec["target_regime"] not in ("trending", "ranging", "breakout", "all"):
         raise SpecError(f"target_regime must be one of trending/ranging/breakout/all, got {spec['target_regime']!r}")
+
+    # Phase 6: archetype is enforced. Lazy import so non-spec callers don't
+    # need to load the archetype catalog.
+    from archetypes import archetype_names, is_coherent
+    valid_archetypes = archetype_names()
+    if spec["archetype"] not in valid_archetypes:
+        raise SpecError(
+            f"archetype must be one of {valid_archetypes}, got {spec['archetype']!r}"
+        )
+    if not is_coherent(spec["archetype"], spec["target_regime"]):
+        raise SpecError(
+            f"archetype {spec['archetype']!r} does not cohere with target_regime "
+            f"{spec['target_regime']!r} — see archetypes.ARCHETYPES coherent_regimes "
+            f"for the valid pairing"
+        )
 
     entry = spec["entry"]
     if not isinstance(entry, dict) or "core" not in entry:
@@ -141,6 +156,7 @@ import numpy as np
 class {name}(BaseGeneratedStrategy):
 
     STRATEGY_THESIS = {thesis_literal}
+    STRATEGY_ARCHETYPE = "{archetype}"
     TARGET_REGIME = "{target_regime}"
     GENERATION_ID = "{generation_id}"
 
@@ -225,6 +241,7 @@ def render_strategy(spec: dict) -> str:
     return _TEMPLATE.format(
         name=spec["name"],
         thesis_literal=json.dumps(spec["thesis"]),  # safely escapes quotes
+        archetype=spec["archetype"],
         target_regime=spec["target_regime"],
         generation_id=spec.get("generation_id", "unknown"),
         timeframe=spec.get("timeframe", "1h"),
