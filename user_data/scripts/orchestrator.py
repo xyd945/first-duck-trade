@@ -239,6 +239,57 @@ def job_fetch_macro_data():
             log.error(f"{label} fetch failed: {e}")
 
 
+def job_fetch_ohlcv():
+    """Weekly: refresh OKX OHLCV feathers used by mini-/full-backtests.
+
+    Walk-forward gate defaults to 3 splits × 60 days = 180 days; we pull 200
+    days as a safety buffer. Freqtrade incrementally appends — re-running is
+    idempotent and only fetches what's new.
+
+    Runs Saturday 19:30 UTC, 30 min before generation, so the Saturday
+    mini-backtests and Sunday full backtests both see fresh data. Without
+    this, backtest windows silently truncate to whatever the feathers cover
+    (last seen: 5 weeks stale, all generated strategies returned 0 trades).
+    """
+    log.info("=== Job: Fetch OKX OHLCV data ===")
+    try:
+        import json
+        with open(BASE_DIR / "config.json") as fh:
+            cfg = json.load(fh)
+        pairs = cfg.get("exchange", {}).get("pair_whitelist", [])
+        timeframe = cfg.get("timeframe", "1h")
+    except Exception as e:
+        log.error(f"OHLCV fetch: could not read pair_whitelist from config: {e}")
+        return
+    if not pairs:
+        log.warning("OHLCV fetch: no pairs configured, skipping")
+        return
+
+    host_project_dir = os.environ.get("HOST_PROJECT_DIR", str(BASE_DIR.parent))
+    compose_file = str(BASE_DIR.parent / "docker-compose.yml")
+    cmd = [
+        "docker", "compose", "-f", compose_file,
+        "--project-directory", host_project_dir,
+        "--profile", "backtest", "run", "--rm",
+        "freqtrade-backtest", "download-data",
+        "--config", "/freqtrade/user_data/config.json",
+        "--pairs", *pairs,
+        "--timeframes", timeframe,
+        "--days", "200",
+    ]
+    log.info(f"OHLCV fetch: {' '.join(cmd)}")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if proc.returncode == 0:
+            log.info(f"OHLCV fetch completed for {len(pairs)} pairs.")
+        else:
+            log.error(f"OHLCV fetch exited {proc.returncode}: {proc.stderr[-500:]}")
+    except subprocess.TimeoutExpired:
+        log.error("OHLCV fetch timed out after 600s")
+    except Exception as e:
+        log.error(f"OHLCV fetch failed: {e}")
+
+
 def job_classify_regime():
     """Daily: classify current market regime using indicators.
 
@@ -1084,6 +1135,9 @@ def main():
     scheduler.add_job(job_apply_regime, "cron", hour=0, minute=15, id="apply_regime")
 
     # --- Weekly jobs: Strategy Factory Loop ---
+    # OHLCV refresh fires 30 min before generation so both Saturday
+    # mini-backtests and Sunday full backtests use fresh OKX data.
+    scheduler.add_job(job_fetch_ohlcv, "cron", day_of_week="sat", hour=19, minute=30, id="fetch_ohlcv")
     # Phase 6: generation moved Sun 02:00 → Sat 20:00 UTC to accommodate the
     # 20-cell coherence matrix (≈3-4 hr generation + 20-30 min backtest at
     # ~3 min/DeepSeek-call). Sunday 02:00 left only ~2 hours before daily

@@ -1,0 +1,105 @@
+"""Tests for orchestrator.job_fetch_ohlcv — weekly OKX OHLCV refresh.
+
+Background: pipeline silently produced 0-trade strategies because OKX feathers
+were 5 weeks stale, truncating backtests below the walk-forward window. This
+job refreshes them weekly before the Saturday generation cron.
+"""
+
+import json
+import sys
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+import pytest
+
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT / "user_data" / "scripts"))
+
+import orchestrator
+
+
+@pytest.fixture
+def cfg_with_pairs(tmp_path, monkeypatch):
+    """Point BASE_DIR at a temp dir holding a minimal config.json."""
+    cfg = {
+        "exchange": {"name": "okx", "pair_whitelist": ["BTC/USDT", "ETH/USDT", "SOL/USDT"]},
+        "timeframe": "1h",
+    }
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    monkeypatch.setattr(orchestrator, "BASE_DIR", tmp_path)
+    return tmp_path
+
+
+def test_fetch_ohlcv_builds_correct_docker_command(cfg_with_pairs):
+    with patch("orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        orchestrator.job_fetch_ohlcv()
+
+    assert mock_run.call_count == 1
+    cmd = mock_run.call_args[0][0]
+    assert cmd[0:2] == ["docker", "compose"]
+    assert "--profile" in cmd and cmd[cmd.index("--profile") + 1] == "backtest"
+    assert "run" in cmd and "--rm" in cmd
+    assert "freqtrade-backtest" in cmd
+    assert "download-data" in cmd
+    # All configured pairs propagated
+    assert "BTC/USDT" in cmd and "ETH/USDT" in cmd and "SOL/USDT" in cmd
+    # 200 days covers walk-forward (3 × 60) with safety buffer
+    assert "--days" in cmd and cmd[cmd.index("--days") + 1] == "200"
+    assert "--timeframes" in cmd and cmd[cmd.index("--timeframes") + 1] == "1h"
+
+
+def test_fetch_ohlcv_handles_missing_config(tmp_path, monkeypatch):
+    """No config.json → log error, do not raise (don't crash orchestrator)."""
+    monkeypatch.setattr(orchestrator, "BASE_DIR", tmp_path)
+    with patch("orchestrator.subprocess.run") as mock_run:
+        orchestrator.job_fetch_ohlcv()  # should not raise
+    assert mock_run.call_count == 0
+
+
+def test_fetch_ohlcv_handles_empty_pair_whitelist(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text(json.dumps({"exchange": {"pair_whitelist": []}}))
+    monkeypatch.setattr(orchestrator, "BASE_DIR", tmp_path)
+    with patch("orchestrator.subprocess.run") as mock_run:
+        orchestrator.job_fetch_ohlcv()
+    assert mock_run.call_count == 0
+
+
+def test_fetch_ohlcv_nonzero_exit_does_not_raise(cfg_with_pairs):
+    """Network/exchange outage → log error, swallow (next weekly run retries)."""
+    with patch("orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stderr="OKX API down")
+        orchestrator.job_fetch_ohlcv()  # should not raise
+    assert mock_run.called
+
+
+def test_fetch_ohlcv_timeout_does_not_raise(cfg_with_pairs):
+    import subprocess
+    with patch("orchestrator.subprocess.run") as mock_run:
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="docker", timeout=600)
+        orchestrator.job_fetch_ohlcv()  # should not raise
+
+
+def test_fetch_ohlcv_uses_host_project_dir_env(cfg_with_pairs, monkeypatch):
+    """HOST_PROJECT_DIR env var must be passed via --project-directory so
+    docker compose volume mounts resolve correctly when invoked from inside
+    the orchestrator container."""
+    monkeypatch.setenv("HOST_PROJECT_DIR", "/host/path/to/repo")
+    with patch("orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        orchestrator.job_fetch_ohlcv()
+    cmd = mock_run.call_args[0][0]
+    idx = cmd.index("--project-directory")
+    assert cmd[idx + 1] == "/host/path/to/repo"
+
+
+def test_fetch_ohlcv_scheduled_weekly_before_generation():
+    """Schedule must fire before job_generate_strategies (Sat 20:00) so the
+    Saturday mini-backtests see fresh data."""
+    src = (ROOT / "user_data" / "scripts" / "orchestrator.py").read_text()
+    # Confirm both schedule lines coexist and ordering is correct (fetch < generate)
+    fetch_idx = src.index('id="fetch_ohlcv"')
+    gen_idx = src.index('id="generate_strategies"')
+    assert fetch_idx < gen_idx, "fetch_ohlcv must be scheduled before generate_strategies in source"
+    # Confirm the cron expression itself
+    assert 'day_of_week="sat", hour=19, minute=30, id="fetch_ohlcv"' in src
