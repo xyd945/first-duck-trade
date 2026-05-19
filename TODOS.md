@@ -36,52 +36,73 @@
 - [ ] Monitoring alerts (Telegram: strategy degradation, kill switch, LLM failures)
 - [ ] Walk-forward validation in backtest runner *(moved to Phase 5, Round 7)*
 
-## Phase 5 — Strategy Quality (current)
+## Phase 5 — Strategy Quality — DONE
 
-Motivation: paper trading proved the plumbing works but not the alpha. Each round below is
-one branch / PR / feedback cycle. Ship → measure → next round.
+All 7 rounds shipped plus the two follow-on consumption layers + correlation gate + LLM
+abstraction. Test suite grew from 46 → 251.
 
-### Round 1 — Failure memory + reflector → generator loop  *(in progress)*
-- [ ] Add `failure_reason` + `failure_verdict` columns to `strategies` table (migration)
-- [ ] Persist reason + verdict in `retire_strategy()` (today it's only logged)
-- [ ] `registry.get_recent_failures(k, regime)` — returns failed candidates w/ reason + code excerpt
-- [ ] `registry.load_recent_reflections(n)` — reads last N reflector markdowns
-- [ ] Extend generator prompt with two new sections:
-  - "LESSONS FROM RECENT REFLECTIONS"
-  - "RECENT FAILURES TO AVOID" (negative examples: thesis + failure reason)
-- [ ] Wire into `job_generate_strategies()` + `job_backtest_candidates()`
-- [ ] Dry-prompt flag on generator CLI for inspection without burning tokens
-- [ ] Unit tests + one end-to-end dry run
+- [x] **Round 1** — Failure memory + reflector → generator loop (PR #11)
+- [x] **Round 2a** — Macro context: FGI / VIX / Gold / DXY / SPX (PR #12)
+- [x] **Round 2b** — BTC perp signals: funding + OI (PR #13)
+- [x] **Round 2c** — Alt-strength proxy via ETH/BTC ratio (PR #19)
+- [x] **Round 2d** — Per-trade macro-bucket attribution (PR #20)
+- [x] **Round 3** — JSON spec → codegen (PR #16)
+- [x] **Round 4** — Hyperopt rescue layer, v1 primitive + v2 orchestrator wiring (PRs #13, #14)
+- [x] **Round 5** — Critic pass (PR #15)
+- [x] **Round 6** — Multi-turn iterative refinement (PR #17)
+- [x] **Round 7** — Pipeline gates: regime / buyhold / walk-forward (PR #18)
+- [x] **R7.4** — Correlation gate (PR #23, deferred from R7 until R2d enabled trade exports)
+- [x] **Reflector consumption** — reflector reads attribution patterns (PR #21)
+- [x] **Generator consumption** — generator reads cross-strategy attribution aggregates (PR #22)
+- [x] **LLM provider abstraction** — DeepSeek default, Anthropic auto-fallback (PR #24)
 
-### Round 2 — External data signals
-- [ ] Funding rates (OKX/Binance perps) as an indicator
-- [ ] Open interest as an indicator
-- [ ] BTC dominance + ETH/BTC cross-asset features
-- [ ] Per-trade attribution log (which rule fired on entry)
+## Phase 6 — Archetype Diversity *(next)*
 
-### Round 3 — Structured strategy spec → codegen
-- [ ] LLM emits JSON spec (entry rules, exit rules, filters, param ranges)
-- [ ] Python template renders Freqtrade class from spec
-- [ ] LLM stops picking magic numbers; focuses on ideas
+Motivation: LLM keeps converging on ~6 textbook archetypes (Donchian breakouts, Keltner
+channels, EMA crosses, BB-RSI bounces, volume breakouts, MACD divergence). The factory is
+producing diversity-in-name-only. Move from suggestion-based steering (prompt asks) to
+structural enforcement (spec validator requires).
 
-### Round 4 — Hyperopt layer
-- [ ] Run Freqtrade hyperopt on passing candidates (LLM shape, optimizer params)
-- [ ] Gate: must beat un-optimized version significantly
+### Active: 10 archetypes × coherent regime cells (22 cells total)
 
-### Round 5 — Critic pass
-- [ ] Second LLM call reviews generated code for look-ahead, over-fit smells, regime assumptions
-- [ ] Reject before backtest to save time/tokens
+- [ ] Add `archetype` field to spec validator with strict enum:
+  `momentum_continuation`, `mean_reversion`, `breakout_volume`, `vol_squeeze`,
+  `vol_compression_mean_reversion`, `funding_contrarian`, `oi_cascade_followthrough`,
+  `alt_strength_divergence`, `macro_led_risk_on`, `liquidity_sweep_followthrough`
+- [ ] Per-archetype prompt blurbs (thesis + typical indicators + threshold conventions)
+- [ ] `generate_batch` iterates the coherence matrix (archetype × regime) instead of
+  cycling regimes — one strategy per coherent cell, ~22/cycle
+- [ ] Failure memory + attribution tagged by archetype
+- [ ] Bump `MAX_CANDIDATES` 30 → 60
+- [ ] Reschedule weekly cycle: Saturday 20:00 UTC (10-hour window) instead of Sunday 02:00
+- [ ] After 3-4 weeks of data: retire dead archetypes, split successful ones into sub-variants
 
-### Round 6 — Multi-turn backtest-in-the-loop
-- [ ] Generate → quick held-out backtest → feed metrics + traces back to LLM → refine
-- [ ] Cap turns to bound cost
+### Deferred — need new infrastructure first
 
-### Round 7 — Pipeline gates & evaluation
-- [ ] Walk-forward validation (non-overlapping windows)
-- [ ] Statistical gates: min 50 trades, Sharpe > 1.0, profit factor > 1.3
-- [ ] **Must beat buy-and-hold** on the same period
-- [ ] Correlation filter: reject candidates correlated > 0.7 with deployed set
-- [ ] Regime-conditional scoring (evaluate ranging strategies only on ranging windows)
+- [ ] **`multi_tf_confirmation` archetype** — 1h entry only when 4h/1d trend agrees.
+  Requires spec renderer support for Freqtrade's `informative_pairs()` +
+  `merge_informative_pair()` mechanism (~half day of work in `strategy_spec.py`).
+  Massively reduces false signals.
+- [ ] **`session_pattern` archetype** — time-of-day / day-of-week entries (Asian/EU/US session
+  effects, weekend liquidity gaps). Requires adding `hour_of_day` and `day_of_week`
+  columns to the dataframe via `add_external_data` or a new indicator helper, plus
+  prompt guidance on typical session windows (~3-4 hours of work).
+
+## Future enhancements
+
+- [ ] **Adaptive `macro_min_confidence`** — spec renderer auto-tunes the threshold per
+  strategy based on attribution lift magnitudes of the chosen macro_confidence buckets.
+  Designed but deferred until enough live attribution data accumulates to validate the
+  tuning rule.
+- [ ] **Pool diversification dashboard** — pairwise correlation heatmap of active
+  strategies, rolling top-lift buckets across the pool, week-over-week alpha decay.
+  Monitor service exists but doesn't surface this yet.
+- [ ] **Real BTC.D from market cap** — currently ETH/BTC proxy (~-0.85 correlation with
+  mcap-based BTC.D). Upgrade requires CoinGecko Pro tier (~$129/mo) or building our own
+  daily snapshot accumulator.
+- [ ] **Auto-deploy promoted strategies to live containers** — currently promotion is to a
+  status in the registry, not to a running freqtrade instance. Auto-deployment needs
+  templated `docker-compose` service generation + per-instance config + safety review gates.
 
 ## Ongoing / cross-cutting
 - [ ] Telegram alerts (degradation, kill switch, LLM failures) — any round
