@@ -33,7 +33,7 @@ from day T-1, not the in-progress day T close.
 import numpy as np
 import pandas as pd
 
-from .fear_and_greed import load_external_dataframe
+from .fear_and_greed import load_external_dataframe, resolve_target_index
 
 
 def add_alt_strength(dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -82,15 +82,16 @@ def add_alt_strength(dataframe: pd.DataFrame) -> pd.DataFrame:
     change_shifted = change_7d.shift(1)
     zscore_shifted = zscore.shift(1)
 
+    target_index = resolve_target_index(dataframe)
     try:
         dataframe["eth_btc_ratio"] = ratio_shifted.reindex(
-            dataframe.index, method="ffill"
+            target_index, method="ffill"
         ).values
         dataframe["eth_btc_change_7d"] = change_shifted.reindex(
-            dataframe.index, method="ffill"
+            target_index, method="ffill"
         ).values
         dataframe["alt_strength_zscore_30d"] = zscore_shifted.reindex(
-            dataframe.index, method="ffill"
+            target_index, method="ffill"
         ).values
     except (TypeError, ValueError):
         # Index types incompatible — fail soft so a single bad reindex

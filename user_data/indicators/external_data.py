@@ -26,7 +26,7 @@ handle NaN with `.fillna()` or explicit guards.
 import pandas as pd
 
 from .alt_strength import add_alt_strength
-from .fear_and_greed import add_fear_and_greed, load_external_dataframe
+from .fear_and_greed import add_fear_and_greed, load_external_dataframe, resolve_target_index
 from .perp_metrics import add_perp_metrics
 
 
@@ -36,18 +36,23 @@ def _attach_external_close(
     column: str,
     timeframe: str = "1d",
 ) -> None:
-    """Reindex an external close series onto the strategy dataframe index.
+    """Reindex an external close series onto the strategy dataframe rows.
 
     Writes to `dataframe[column]` in place. Shifts by 1 day to avoid using a
     daily close before the day has ended. If the source file is missing or
     unreadable, writes NaN — never raises.
+
+    Uses ``resolve_target_index`` so this works whether the caller passes a
+    DatetimeIndex dataframe (manual/notebook use) or a RangeIndex dataframe
+    with a 'date' column (Freqtrade).
     """
     src = load_external_dataframe(pair, timeframe)
     if src.empty:
         dataframe[column] = pd.NA
         return
+    target_index = resolve_target_index(dataframe)
     try:
-        series = src["close"].shift(1).reindex(dataframe.index, method="ffill")
+        series = src["close"].shift(1).reindex(target_index, method="ffill")
         dataframe[column] = series.values
     except (TypeError, ValueError):
         dataframe[column] = pd.NA
