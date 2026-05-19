@@ -113,15 +113,19 @@ def critic_review(
     user_prompt = f"Review this Freqtrade strategy:\n\n```python\n{code}\n```"
 
     try:
-        # 2048 instead of 1024: reasoning-capable models (DeepSeek V4 Pro)
-        # consume tokens for internal reasoning_content before emitting the
-        # JSON verdict. 1024 was tight enough that a long reasoning
-        # preamble left no room for the issues array.
+        # 4096 because reasoning-capable models (DeepSeek V4 Pro) burn a
+        # non-deterministic 30-300 tokens on internal reasoning_content
+        # BEFORE emitting the visible JSON. 2048 worked most of the time
+        # but live trials caught occasional truncation mid-reasoning,
+        # leaving no JSON in the output and a synthetic-PASS fallback that
+        # silently strips the critic's value. 4096 gives comfortable
+        # headroom for ~500 tokens of reasoning + a verbose REJECT verdict
+        # with several issues.
         text = chat_completion(
             messages=[{"role": "user", "content": user_prompt}],
             system=CRITIC_SYSTEM_PROMPT,
             model=model,
-            max_tokens=2048,
+            max_tokens=4096,
             provider=provider,
         )
     except Exception as e:
