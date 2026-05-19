@@ -206,6 +206,70 @@ def test_get_recent_attributions_orders_newest_first(isolated_registry, tmp_path
     assert set(names) == {"First", "Second", "Third"}
 
 
+def test_archetype_aware_eviction_protects_rare_archetypes(isolated_registry, tmp_path, monkeypatch):
+    """When the candidate pool overflows, the oldest candidate of an
+    OVER-REPRESENTED archetype should be evicted — NOT the only candidate
+    of a rare archetype that just happens to be the oldest."""
+    sr = isolated_registry
+    monkeypatch.setattr(sr, "MAX_CANDIDATES", 4)
+
+    # Seed the pool to capacity:
+    #   - rare_archetype: 1 candidate, oldest
+    #   - busy_archetype: 3 candidates, newer
+    rare_id = sr.register_strategy(
+        name="RareOldest", filepath=str(tmp_path / "rare.py"),
+        thesis="x", target_regime="all", archetype="alt_strength_divergence",
+    )
+    busy_ids = []
+    for i in range(3):
+        busy_ids.append(sr.register_strategy(
+            name=f"BusyNew{i}", filepath=str(tmp_path / f"busy{i}.py"),
+            thesis="x", target_regime="trending",
+            archetype="momentum_continuation",
+        ))
+
+    # Pool is at 4. Register a fifth → eviction triggered. Naive "oldest
+    # wins" would kill the rare one; archetype-aware logic must instead
+    # kill the oldest busy_archetype member.
+    sr.register_strategy(
+        name="NewArrival", filepath=str(tmp_path / "new.py"),
+        thesis="x", target_regime="ranging", archetype="mean_reversion",
+    )
+
+    rare = sr.get_strategy_by_name("RareOldest")
+    busy0 = sr.get_strategy_by_name("BusyNew0")
+    assert rare["status"] == "candidate", \
+        "the only alt_strength_divergence candidate must NOT be evicted"
+    assert busy0["status"] == "retired", \
+        "the oldest momentum_continuation candidate should be the eviction victim"
+
+
+def test_eviction_falls_back_to_oldest_when_all_archetypes_unique(isolated_registry, tmp_path, monkeypatch):
+    """If every candidate has a unique archetype, there's no over-
+    represented archetype to evict from — fall back to evicting plain oldest."""
+    sr = isolated_registry
+    monkeypatch.setattr(sr, "MAX_CANDIDATES", 3)
+
+    archs = ["momentum_continuation", "mean_reversion", "vol_squeeze"]
+    for i, a in enumerate(archs):
+        sr.register_strategy(
+            name=f"Unique{i}", filepath=str(tmp_path / f"u{i}.py"),
+            thesis="x", target_regime="all", archetype=a,
+        )
+
+    # Pool full, all unique archetypes. Adding a fourth → evict plain oldest.
+    sr.register_strategy(
+        name="Fourth", filepath=str(tmp_path / "u4.py"),
+        thesis="x", target_regime="all", archetype="funding_contrarian",
+    )
+
+    assert sr.get_strategy_by_name("Unique0")["status"] == "retired", \
+        "with all-unique archetypes, the plain-oldest candidate is evicted"
+    assert sr.get_strategy_by_name("Unique1")["status"] == "candidate"
+    assert sr.get_strategy_by_name("Unique2")["status"] == "candidate"
+    assert sr.get_strategy_by_name("Fourth")["status"] == "candidate"
+
+
 def test_get_active_strategies_with_trade_paths(isolated_registry, tmp_path):
     """Active strategies should come back with their MOST RECENT backtest's
     trade export path. Candidates and retired strategies are excluded.

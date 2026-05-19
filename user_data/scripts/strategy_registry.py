@@ -29,10 +29,13 @@ REFLECTIONS_DIR = BASE_DIR / "data" / "reflections"
 
 # Pool limits
 MAX_ACTIVE = 10
-# Bumped 30 → 60 for Phase 6: weekly generation now produces ~20 strategies
-# (one per coherence-matrix cell) instead of 5, so the pool would saturate
-# in ~2 weeks otherwise.
-MAX_CANDIDATES = 60
+# Bumped 30 → 100 for Phase 6. Weekly generation produces 20 strategies (one per
+# coherence-matrix cell). Backtest cycle evaluates up to 10/run. In steady state
+# the pool sits around 30-40 candidates; 100 gives ~3 weeks of buffer even if
+# backtests timeout or get delayed. Higher than strictly necessary, but cheap —
+# the cost is a single int column in SQLite — and it protects diversity by
+# making auto-evictions rare.
+MAX_CANDIDATES = 100
 
 
 def get_db() -> sqlite3.Connection:
@@ -173,17 +176,39 @@ def register_strategy(
     ).fetchone()[0]
 
     if count >= MAX_CANDIDATES:
-        # Retire the oldest candidate
-        oldest = conn.execute(
-            "SELECT id, name FROM strategies WHERE status = 'candidate' "
-            "ORDER BY created_at ASC LIMIT 1"
-        ).fetchone()
-        if oldest:
+        # Phase 6: archetype-aware eviction. Naive "evict oldest" risks
+        # killing the only candidate of a rare archetype (e.g. an
+        # `oi_cascade_followthrough` that's been waiting for backtest
+        # while five `momentum_continuation` candidates queue up). Prefer
+        # to evict the oldest candidate of an archetype that's already
+        # over-represented in the queue. Fall back to plain oldest if
+        # no archetype has duplicates (all unique → no diversity to
+        # protect, just trim the head).
+        victim = conn.execute("""
+            SELECT id, name, archetype FROM strategies
+            WHERE status = 'candidate'
+              AND archetype IN (
+                SELECT archetype FROM strategies
+                WHERE status = 'candidate' AND archetype != ''
+                GROUP BY archetype HAVING COUNT(*) >= 2
+              )
+            ORDER BY created_at ASC LIMIT 1
+        """).fetchone()
+        if victim is None:
+            # No archetype has 2+ candidates — fall back to plain oldest.
+            victim = conn.execute(
+                "SELECT id, name, archetype FROM strategies WHERE status = 'candidate' "
+                "ORDER BY created_at ASC LIMIT 1"
+            ).fetchone()
+        if victim:
             conn.execute(
                 "UPDATE strategies SET status = 'retired', retired_at = ? WHERE id = ?",
-                (now, oldest["id"]),
+                (now, victim["id"]),
             )
-            log.info(f"Auto-retired oldest candidate: {oldest['name']}")
+            log.info(
+                f"Auto-retired oldest candidate: {victim['name']} "
+                f"(archetype={victim['archetype'] or 'legacy'})"
+            )
 
     cursor = conn.execute(
         """INSERT INTO strategies (name, filepath, thesis, target_regime, generation_id,
