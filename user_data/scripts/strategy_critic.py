@@ -81,9 +81,17 @@ Specific things to flag as HIGH severity:
    that was computed using today's high.
 
 5. THRESHOLD SANITY
-   RSI compared to a value outside 0-100, %B compared outside 0-1, fgi against
-   values outside roughly -50 to +50, funding rate against values outside
-   -0.005 to +0.005 (50bp / 8h is already extreme).
+   RSI compared to a value outside 0-100, %B compared outside 0-1, funding
+   rate against values outside -0.005 to +0.005 (50bp / 8h is already extreme).
+
+   IMPORTANT — fgi is project-specific, NOT the public 0-100 Alternative.me
+   index. Empirical range on real data: roughly -22 to +45, median ~5, std ~12.
+   - fgi < 0     fires ~45% of days   (NOT "always false" — common valid filter)
+   - fgi < -10   fires ~10% of days   (strong fear, sharp contrarian signal)
+   - fgi > 20    fires ~10% of days   (strong greed)
+   - fgi < -50, fgi > 50, fgi > 70, fgi < 0 || > 100 — ANY threshold treating
+     fgi as 0-100 IS the bug; flag it as such. But never flag fgi < 0,
+     fgi < -10, or fgi > 20 as impossible — those are correct usage.
 
 You output ONLY the JSON object. No prose, no markdown fences."""
 

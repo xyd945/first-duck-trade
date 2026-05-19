@@ -56,10 +56,17 @@ CRITICAL RULES:
     This injects macro context the strategy is encouraged (not required) to use.
 
 EXTERNAL DATA (available via add_external_data — already shifted +1 day to avoid look-ahead):
-  dataframe['fgi']    Fear & Greed composite (PMACD + RoR + Money Flow + VIX + Gold).
-                      Negative = Fear (extreme oversold macro), Positive = Greed.
-                      Useful as a contrarian filter (e.g. only long when fgi < -10
-                      = market is fearful = better risk/reward for longs).
+  dataframe['fgi']    PROJECT-SPECIFIC composite (NOT the public 0-100
+                      Alternative.me Fear & Greed Index). Empirical range on
+                      our data is roughly -22 to +45, median ~5, std ~12.
+                      Negative = Fear (oversold macro, contrarian-long signal),
+                      Positive = Greed.
+                      Useful thresholds (empirical, ~10% of days fall here):
+                        fgi < -10   strong fear  (good contrarian long entry)
+                        fgi > +20   strong greed (caution on momentum entries)
+                      DO NOT compare against 50, 70, or any 0-100 scale — those
+                      thresholds will silently never (or always) fire and ruin
+                      the strategy. fgi < 0 fires roughly 45% of days.
   dataframe['vix']    CBOE Volatility Index daily close. High vix = panic.
                       Low vix (under ~18) historically favors trend continuation.
   dataframe['gold']   Gold futures close. Rising gold often means risk-off.
