@@ -301,3 +301,120 @@ def test_attribution_section_renders_above_failure_examples():
     attr_idx = prompt.index("MARKER_ATTRIBUTION")
     fail_idx = prompt.index("MARKER_FAILURE")
     assert attr_idx < fail_idx
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — generate_batch cells mode + archetype prompt injection
+# ---------------------------------------------------------------------------
+
+def test_build_prompt_injects_archetype_blurb():
+    """When archetype is provided, the prompt must contain the archetype
+    name and the validator-enforcement warning."""
+    from strategy_generator import build_generation_prompt
+
+    prompt = build_generation_prompt(
+        target_regime="trending",
+        archetype="momentum_continuation",
+    )
+    assert "ARCHETYPE: momentum_continuation" in prompt
+    assert "spec validator will REJECT" in prompt
+    # Blurb's thesis-specific content lands too
+    assert "trend" in prompt.lower()
+
+
+def test_build_prompt_archetype_lands_at_top():
+    """Archetype is the strongest constraint — must come before regime context
+    sections like failures and attribution. (Top-of-prompt has the strongest
+    pull on reasoning model outputs.)"""
+    from strategy_generator import build_generation_prompt
+
+    prompt = build_generation_prompt(
+        target_regime="trending",
+        archetype="momentum_continuation",
+        attribution_patterns="MARKER_ATTRIBUTION",
+        failure_examples="MARKER_FAILURE",
+    )
+    archetype_idx = prompt.index("ARCHETYPE: momentum_continuation")
+    attr_idx = prompt.index("MARKER_ATTRIBUTION")
+    fail_idx = prompt.index("MARKER_FAILURE")
+    assert archetype_idx < attr_idx
+    assert archetype_idx < fail_idx
+
+
+def test_build_prompt_without_archetype_is_legacy_shape():
+    """Backward compat: legacy callers (no archetype) get the old prompt
+    shape without the archetype block."""
+    from strategy_generator import build_generation_prompt
+    prompt = build_generation_prompt(target_regime="all")
+    assert "ARCHETYPE:" not in prompt
+
+
+def test_generate_batch_cells_mode_iterates_per_cell():
+    """When cells is provided, generate_batch iterates each (archetype, regime)
+    tuple and passes the archetype through to generate_strategy."""
+    from strategy_generator import generate_batch
+
+    seen = []
+
+    def capture(**kwargs):
+        seen.append({
+            "target_regime": kwargs.get("target_regime"),
+            "archetype": kwargs.get("archetype"),
+        })
+        return _BATCH_SUCCESS
+
+    with patch("strategy_generator.generate_strategy", side_effect=capture):
+        results = generate_batch(cells=[
+            ("momentum_continuation", "trending"),
+            ("mean_reversion", "ranging"),
+            ("funding_contrarian", "all"),
+        ])
+
+    assert len(results) == 3
+    assert seen == [
+        {"target_regime": "trending", "archetype": "momentum_continuation"},
+        {"target_regime": "ranging", "archetype": "mean_reversion"},
+        {"target_regime": "all", "archetype": "funding_contrarian"},
+    ]
+
+
+def test_generate_batch_cells_mode_stamps_archetype_on_result():
+    """The caller should be able to read back archetype + target_regime
+    from the result dict without re-parsing the file."""
+    from strategy_generator import generate_batch
+
+    with patch("strategy_generator.generate_strategy", return_value=_BATCH_SUCCESS):
+        results = generate_batch(cells=[("vol_squeeze", "breakout")])
+
+    assert results[0]["archetype"] == "vol_squeeze"
+    assert results[0]["target_regime"] == "breakout"
+
+
+def test_generate_batch_cells_mode_routes_to_iterate_when_iterative_true():
+    """cells mode + iterative=True must call generate_and_iterate, not the
+    single-shot generate_strategy."""
+    from strategy_generator import generate_batch
+
+    with patch("strategy_generator.generate_and_iterate", return_value=_BATCH_SUCCESS) as mock_iter, \
+         patch("strategy_generator.generate_strategy", side_effect=AssertionError("should not fire")):
+        generate_batch(cells=[("mean_reversion", "ranging")], iterative=True, max_turns=2)
+
+    assert mock_iter.call_count == 1
+    call_kwargs = mock_iter.call_args.kwargs
+    assert call_kwargs["archetype"] == "mean_reversion"
+    assert call_kwargs["target_regime"] == "ranging"
+
+
+def test_generate_batch_legacy_regimes_mode_still_works():
+    """The pre-Phase-6 (count + regimes) signature must still function for
+    tests and CLI uses."""
+    from strategy_generator import generate_batch
+
+    with patch("strategy_generator.generate_strategy", return_value=_BATCH_SUCCESS) as mock_gen:
+        results = generate_batch(count=2, regimes=["trending", "ranging"])
+
+    assert len(results) == 2
+    assert mock_gen.call_count == 2
+    # archetype is None in legacy mode
+    for call in mock_gen.call_args_list:
+        assert call.kwargs.get("archetype") is None

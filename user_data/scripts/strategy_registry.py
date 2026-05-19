@@ -29,7 +29,10 @@ REFLECTIONS_DIR = BASE_DIR / "data" / "reflections"
 
 # Pool limits
 MAX_ACTIVE = 10
-MAX_CANDIDATES = 30
+# Bumped 30 → 60 for Phase 6: weekly generation now produces ~20 strategies
+# (one per coherence-matrix cell) instead of 5, so the pool would saturate
+# in ~2 weeks otherwise.
+MAX_CANDIDATES = 60
 
 
 def get_db() -> sqlite3.Connection:
@@ -80,6 +83,18 @@ def _migrate_trades_export_path_column(conn: sqlite3.Connection):
         log.info("Migrated backtest_results: added trades_export_path")
 
 
+def _migrate_archetype_column(conn: sqlite3.Connection):
+    """Phase 6: add archetype column to strategies so failure memory and
+    attribution can be queried/aggregated per-archetype (e.g. "retire the
+    vol_squeeze archetype — 0% promotion rate after 8 weeks")."""
+    cols = _column_names(conn, "strategies")
+    if "archetype" not in cols:
+        conn.execute(
+            "ALTER TABLE strategies ADD COLUMN archetype TEXT DEFAULT ''"
+        )
+        log.info("Migrated strategies: added archetype")
+
+
 def init_db():
     """Create tables if they don't exist, then run migrations."""
     conn = get_db()
@@ -125,6 +140,7 @@ def init_db():
     _migrate_failure_columns(conn)
     _migrate_attribution_column(conn)
     _migrate_trades_export_path_column(conn)
+    _migrate_archetype_column(conn)
     conn.commit()
     conn.close()
     log.info(f"Registry initialized at {DB_PATH}")
@@ -140,8 +156,14 @@ def register_strategy(
     thesis: str = "",
     target_regime: str = "all",
     generation_id: str = "",
+    archetype: str = "",
 ) -> int:
-    """Register a new candidate strategy. Returns strategy ID."""
+    """Register a new candidate strategy. Returns strategy ID.
+
+    `archetype` (Phase 6) is the enum value from archetypes.py — used by
+    failure memory and attribution queries to filter/aggregate per-archetype.
+    Empty string for legacy strategies registered before Phase 6.
+    """
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
 
@@ -165,13 +187,14 @@ def register_strategy(
 
     cursor = conn.execute(
         """INSERT INTO strategies (name, filepath, thesis, target_regime, generation_id,
-           status, created_at) VALUES (?, ?, ?, ?, ?, 'candidate', ?)""",
-        (name, str(filepath), thesis, target_regime, generation_id, now),
+           archetype, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'candidate', ?)""",
+        (name, str(filepath), thesis, target_regime, generation_id, archetype, now),
     )
     conn.commit()
     strategy_id = cursor.lastrowid
     conn.close()
-    log.info(f"Registered strategy: {name} (id={strategy_id}, regime={target_regime})")
+    log.info(f"Registered strategy: {name} (id={strategy_id}, "
+             f"regime={target_regime}, archetype={archetype or 'legacy'})")
     return strategy_id
 
 
@@ -448,7 +471,7 @@ def get_recent_attributions(n: int = 10, min_trades: int = 10) -> list:
     """
     conn = get_db()
     rows = conn.execute("""
-        SELECT s.name, s.target_regime, s.status, s.thesis,
+        SELECT s.name, s.target_regime, s.archetype, s.status, s.thesis,
                br.total_trades, br.profit_total_pct, br.sharpe,
                br.attribution_json, br.created_at
         FROM backtest_results br
@@ -490,7 +513,7 @@ def get_recent_failures(k: int = 8, regime: str | None = None) -> list:
     params.append(k)
 
     rows = conn.execute(f"""
-        SELECT s.id, s.name, s.thesis, s.target_regime, s.generation_id,
+        SELECT s.id, s.name, s.thesis, s.target_regime, s.archetype, s.generation_id,
                s.filepath, s.failure_reason, s.failure_verdict, s.retired_at,
                br.sharpe, br.profit_total_pct, br.total_trades, br.max_drawdown_pct
         FROM strategies s

@@ -292,8 +292,15 @@ def build_generation_prompt(
     reflector_insights: str = "",
     failure_examples: str = "",
     attribution_patterns: str = "",
+    archetype: str | None = None,
 ) -> str:
     """Build the user prompt for strategy generation.
+
+    archetype: Phase 6 — if provided, the strategy MUST be of this archetype.
+    The archetype's thesis + indicator/threshold guidance is injected at the
+    TOP of the prompt (highest priority instruction) and the LLM is told the
+    spec validator will reject a non-matching spec. Values must match the
+    enum in archetypes.py.
 
     reflector_insights: strategic lessons the reflector agent wrote after
     reviewing live trades. Pre-rendered markdown from
@@ -317,6 +324,23 @@ def build_generation_prompt(
 
 TARGET REGIME: {target_regime}
 GENERATION ID: {generation_id}
+
+"""
+
+    # Phase 6: archetype is the single most important constraint — put it
+    # at the TOP of the prompt. The spec validator enforces this; a wrong
+    # archetype = guaranteed rejection.
+    if archetype:
+        from archetypes import thesis_for, prompt_blurb_for
+        prompt += f"""ARCHETYPE: {archetype}
+{thesis_for(archetype)}
+
+The spec you emit MUST set "archetype": "{archetype}" and the strategy logic
+MUST follow this archetype's thesis. The spec validator will REJECT specs
+whose archetype field doesn't match this instruction.
+
+ARCHETYPE GUIDANCE:
+{prompt_blurb_for(archetype)}
 
 """
 
@@ -404,6 +428,11 @@ OUTPUT FORMAT — return ONE JSON object, no prose, no markdown fences:
 {
   "name": "PascalCaseClassName",
   "thesis": "One sentence describing why this should produce alpha.",
+  "archetype": "momentum_continuation" | "mean_reversion" | "breakout_volume" |
+               "vol_squeeze" | "vol_compression_mean_reversion" |
+               "funding_contrarian" | "oi_cascade_followthrough" |
+               "alt_strength_divergence" | "macro_led_risk_on" |
+               "liquidity_sweep_followthrough",
   "target_regime": "trending" | "ranging" | "breakout" | "all",
   "timeframe": "1h",
   "indicators": [
@@ -546,6 +575,7 @@ def generate_strategy(
     failure_examples: str = "",
     attribution_patterns: str = "",
     provider: str | None = None,
+    archetype: str | None = None,
 ) -> dict:
     """
     Generate a new strategy via the LLM.
@@ -583,6 +613,7 @@ def generate_strategy(
             reflector_insights=reflector_insights,
             failure_examples=failure_examples,
             attribution_patterns=attribution_patterns,
+            archetype=archetype,
         )
 
         try:
@@ -755,6 +786,7 @@ def generate_and_iterate(
     attribution_patterns: str = "",
     model: str | None = None,
     provider: str | None = None,
+    archetype: str | None = None,
     max_turns: int = 3,
     accept_min_trades: int = 5,
     backtest_fn=None,
@@ -804,6 +836,7 @@ def generate_and_iterate(
             attribution_patterns=attribution_patterns,
             model=model,
             provider=provider,
+            archetype=archetype,
         )
         if not gen.get("success"):
             # generate_strategy itself failed (spec parse, validation, etc.). Give up.
@@ -857,6 +890,7 @@ def generate_and_iterate(
 def generate_batch(
     count: int = 5,
     regimes: list = None,
+    cells: list[tuple[str, str]] = None,
     context: str = "",
     existing_results: str = "",
     reflector_insights: str = "",
@@ -865,7 +899,19 @@ def generate_batch(
     iterative: bool = False,
     max_turns: int = 3,
 ) -> list:
-    """Generate a batch of strategies across different regimes.
+    """Generate a batch of strategies.
+
+    Two modes:
+      (Phase 6, preferred) cells: list of (archetype, regime) tuples
+          Iterates the coherence matrix — one strategy per cell, each
+          baked to a specific archetype × regime. The archetype is
+          enforced by the spec validator. Use archetypes.coherence_matrix()
+          to get the full 20-cell list.
+
+      (legacy) regimes + count
+          Cycles through regimes for `count` iterations with no
+          archetype constraint. Kept for backward compat — old tests,
+          ad-hoc CLI runs — but the orchestrator should use cells.
 
     get_failures_for_regime: optional callable(regime: str) -> str
         Returns a pre-formatted failure_examples block for the given regime.
@@ -877,13 +923,21 @@ def generate_batch(
         given regime. Same callable pattern as get_failures_for_regime so the
         orchestrator can fan registry queries out cleanly.
     """
-    if regimes is None:
-        regimes = ["trending", "ranging", "breakout", "all"]
+    # Build the list of (archetype, regime) jobs to run, where archetype
+    # may be None for legacy mode.
+    if cells is not None:
+        jobs = list(cells)
+        log.info(f"Batch: iterating {len(jobs)} (archetype, regime) cells")
+    else:
+        if regimes is None:
+            regimes = ["trending", "ranging", "breakout", "all"]
+        jobs = [(None, regimes[i % len(regimes)]) for i in range(count)]
+        log.info(f"Batch: legacy mode, {len(jobs)} regime-only generations")
 
     results = []
-    for i in range(count):
-        regime = regimes[i % len(regimes)]
-        log.info(f"=== Generating strategy {i+1}/{count} for regime: {regime} ===")
+    for i, (archetype, regime) in enumerate(jobs):
+        tag = f"{archetype or 'no-archetype'} × {regime}"
+        log.info(f"=== Generating strategy {i+1}/{len(jobs)}: {tag} ===")
         failures = get_failures_for_regime(regime) if get_failures_for_regime else ""
         attribution = get_attribution_for_regime(regime) if get_attribution_for_regime else ""
         if iterative:
@@ -894,6 +948,7 @@ def generate_batch(
                 reflector_insights=reflector_insights,
                 failure_examples=failures,
                 attribution_patterns=attribution,
+                archetype=archetype,
                 max_turns=max_turns,
             )
         else:
@@ -904,16 +959,22 @@ def generate_batch(
                 reflector_insights=reflector_insights,
                 failure_examples=failures,
                 attribution_patterns=attribution,
+                archetype=archetype,
             )
+        # Stamp the requested archetype + regime onto the result so the
+        # caller can register it without re-parsing the file. (The file
+        # also stores STRATEGY_ARCHETYPE as a class attr — see strategy_spec.)
+        result["archetype"] = archetype
+        result["target_regime"] = regime
         results.append(result)
 
-        if result["success"]:
+        if result.get("success"):
             log.info(f"  SUCCESS: {result['filepath']}")
         else:
             log.warning(f"  FAILED: {result.get('error', 'unknown')}")
 
-    passed = sum(1 for r in results if r["success"])
-    log.info(f"Batch complete: {passed}/{count} strategies passed validation")
+    passed = sum(1 for r in results if r.get("success"))
+    log.info(f"Batch complete: {passed}/{len(jobs)} strategies passed validation")
     return results
 
 
