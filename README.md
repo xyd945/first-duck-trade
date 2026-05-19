@@ -1,239 +1,348 @@
 # First Duck Trade
 
-An algorithmic crypto trading system with an LLM-powered **Strategy Factory** — Claude automatically generates, validates, backtests, and deploys trading strategies. Built on [Freqtrade](https://github.com/freqtrade/freqtrade).
+A self-improving algorithmic crypto trading system: an LLM (DeepSeek by default, Claude as fallback) automatically generates trading strategies, runs them through a multi-layer defensive filter, deploys the survivors to paper-trade on OKX, and feeds the results back into the next generation cycle. Built on [Freqtrade](https://github.com/freqtrade/freqtrade).
 
-## Quick Start
+The point is **not** to ask an LLM to write one strategy and run it. The point is to build a pipeline that produces, evaluates, and learns from many strategies on a weekly cadence, so that what gets deployed is what survived several rounds of evidence-based filtering — not what a single LLM call happened to produce.
 
-Unless you plan to rewrite the core engine of Freqtrade (which is rare), do not fork the repository. Forking creates a maintenance nightmare when Freqtrade releases updates.
+## Quick start
 
-- Repo: Create a new, clean repository for your project (in our case First Duck Trade)
-- Structure: You will strictly separate your logic from Freqtrade's core using the user_data folder pattern.
-- Dependency: Treat Freqtrade as an external dependency (via Docker), not your own code.
+You need three things: Docker, an OKX account (demo trading is fine), and an LLM API key (DeepSeek by default, or Anthropic).
 
 ```bash
-# Create your clean repo
-mkdir first-duck-trade
+# 1. Clone
+git clone https://github.com/xyd945/first-duck-trade.git
 cd first-duck-trade
 
-# Download the official docker file (don't clone the whole repo)
-curl https://raw.githubusercontent.com/freqtrade/freqtrade/stable/docker-compose.yml -o docker-compose.yml
+# 2. Configure
+cp .env.example .env
+# Edit .env — fill in:
+#   DEEPSEEK_API_KEY   (https://platform.deepseek.com)
+#   ANTHROPIC_API_KEY  (optional; serves as auto-fallback if DeepSeek errors)
+#   TELEGRAM_TOKEN / TELEGRAM_CHAT_ID  (optional; for alerts)
+mkdir -p user_data/configs
+# Create user_data/configs/config-sweep.json and config-momentum.json
+# (Freqtrade configs with your OKX demo API keys; see "Per-instance configs" below)
 
-# Initialize the user_data folder
-docker compose run --rm freqtrade create-userdir --userdir user_data
-
-# Create configuration - Requires answering interactive questions
-docker compose run --rm freqtrade new-config --config user_data/config.json
-```
-
-### 1. Download Historical Data
-
-```bash
-docker compose run --rm freqtrade download-data \
-  --config /freqtrade/user_data/config.json \
-  --pairs BTC/USDT:USDT ETH/USDT:USDT SOL/USDT:USDT \
-  --timeframe 5m 15m 1h 4h \
+# 3. Download historical data (one-time, ~3-5 min)
+docker compose run --rm freqtrade-sweep download-data \
+  --config /freqtrade/user_data/configs/config-sweep.json \
+  --pairs BTC/USDT ETH/USDT SOL/USDT XRP/USDT \
+  --timeframe 1h 4h 1d \
   --days 365
-```
 
-### 2. Run Backtest
-
-```bash
-docker compose run --rm freqtrade backtesting \
-  --config /freqtrade/user_data/config.json \
-  --strategy MyFirstStrategy \
-  --timeframe 1h
-```
-
-### 3. Run Hyperopt (Optimization)
-
-```bash
-docker compose run --rm freqtrade hyperopt \
-  --config /freqtrade/user_data/config.json \
-  --strategy MyFirstStrategy \
-  --hyperopt-loss SharpeHyperOptLoss \
-  --spaces buy sell \
-  --epochs 100
-```
-
-### 4. Start Live/Dry Run
-
-```bash
+# 4. Bring everything up
 docker compose up -d
+
+# 5. Verify (all should be "Up")
+docker compose ps
+docker compose logs --tail 30 orchestrator | grep "Jobs registered"
 ```
 
-### 5. View Logs
-
-```bash
-docker compose logs -f
-```
-
-### 6. Stop Bot
-
-```bash
-docker compose down
-```
+After this, the orchestrator runs autonomously. Nothing for you to do until the first weekly cycle fires on Sunday 02:00 UTC.
 
 ## Architecture
 
 ```
-                         ┌─────────────────────────────────┐
-                         │        ORCHESTRATOR              │
-                         │     (APScheduler, Python)        │
-                         │                                  │
-                         │  Daily:                          │
-                         │    00:05  Fetch macro data       │
-                         │    00:10  Classify regime        │
-                         │    00:12  LLM regime override    │
-                         │    00:15  Apply regime routing   │
-                         │                                  │
-                         │  Weekly (Sunday):                │
-                         │    02:00  Generate strategies    │
-                         │    02:30  Backtest candidates    │
-                         │    03:00  Weekly reflection      │
-                         │                                  │
-                         │  Continuous:                     │
-                         │    Every 2m  Health check        │
-                         │    Every 5m  Risk check          │
-                         └──────────┬──────────────────────┘
-                                    │
-                    ┌───────────────┼───────────────┐
-                    │               │               │
-                    ▼               ▼               ▼
-          ┌─────────────┐ ┌─────────────┐ ┌─────────────────┐
-          │  ft-sweep   │ │ ft-momentum │ │  ft-backtest    │
-          │  Port 8081  │ │  Port 8082  │ │  (on-demand)    │
-          │             │ │             │ │                 │
-          │  Ranging    │ │  Trending   │ │  Sandboxed      │
-          │  strategy   │ │  strategy   │ │  CPU/mem limits │
-          └─────────────┘ └─────────────┘ └─────────────────┘
-                    │               │
-                    └───────┬───────┘
-                            ▼
-                    ┌───────────────┐
-                    │   OKX Demo    │
-                    │   Trading     │
-                    │  (simulated)  │
-                    └───────────────┘
+                    ┌──────────────────────────────────────────────┐
+                    │                ORCHESTRATOR                   │
+                    │        APScheduler — runs the loop            │
+                    └──────────────────────────────────────────────┘
+                                       │
+        ┌──────────────────────────────┼──────────────────────────────┐
+        │                              │                              │
+        ▼                              ▼                              ▼
+  DATA INGESTION              STRATEGY FACTORY                  LIVE TRADING
+                                                                      │
+  Macro     (Yahoo daily)     ┌─ generate ── DeepSeek/Claude      ┌──┴──┐
+   ↳ VIX, GOLD, DXY, SPX      ├─ critic   ── second LLM pass      │     │
+                              ├─ iterate  ── mini-backtest loop   ▼     ▼
+  Perp     (Binance fut)      └─ register ── candidate            ft-sweep  ft-momentum
+   ↳ funding rate                                                 │     │
+   ↳ open interest                  │                             │     │
+                                    ▼                             ▼     ▼
+  Spot     (Binance daily)    ┌─ backtest ── full 6-month        OKX spot trading
+   ↳ ETH, BTC                 ├─ attribute ── per-trade macro     (demo by default)
+   ↳ → ETH/BTC ratio          ├─ gate     ── regime/buyhold/      
+                              │              walk-forward/        
+                                              correlation         
+                              └─ promote ── if all gates pass     
+                                                │                  
+                                                ▼                  
+                                       ┌─────────────────┐         
+                                       │ REGISTRY (SQL)  │         
+                                       │ candidate →     │         
+                                       │ active →        │         
+                                       │ retired         │         
+                                       └────────┬────────┘         
+                                                │                   
+                              ┌─────────────────┴─────────────────┐
+                              │  FEEDBACK INTO NEXT GENERATION    │
+                              │  (closes the loop)                │
+                              │                                   │
+                              │  - failure memory (don't repeat)  │
+                              │  - reflection (weekly LLM review) │
+                              │  - attribution patterns           │
+                              │  - hyperopt rescue                │
+                              └───────────────────────────────────┘
 ```
 
-### How It Works
+## The strategy factory loop
 
-The system has four main layers that work together:
+The core insight: **a single LLM-generated strategy almost never works**. What works is a pipeline where the LLM is one stage in a multi-stage filter, and where each cycle's failures become the next cycle's training signal.
 
-**1. Market Regime Detection**
+There are nine moving parts. Each was added because the previous version of the pipeline had a specific, observable failure mode.
 
-Every day the orchestrator classifies the market into one of four regimes: `trending`, `ranging`, `breakout`, or `crisis`. It uses two signals:
+### 1. Failure memory
 
-- **Indicator-based**: ADX for trend strength, EMA alignment, volatility percentile, Fear & Greed index
-- **LLM override**: Claude analyzes macro data (VIX, Gold, DXY, SPX) and confirms or overrides the indicator regime
+After a strategy fails (validation, backtest, or post-deploy), its name, thesis, entry logic, and failure verdict are written to the SQLite registry. The next generation cycle injects up to 8 recent failures per regime into the prompt as a "do NOT repeat these" block. Without this, the LLM generates the same losing strategy ideas every week.
 
-The detected regime determines which trading instance is active:
+### 2a. Macro context (FGI, VIX, Gold, DXY, SPX)
 
-| Regime | Active Instance | Strategy |
-|--------|----------------|----------|
-| `ranging` | ft-sweep | LiquiditySweepStrategy (mean-reversion) |
-| `trending` / `breakout` | ft-momentum | MomentumTrendStrategy (trend-following) |
-| `crisis` | none | All trading stopped |
+Daily Yahoo Finance fetcher writes external-asset closes to disk. The `add_external_data()` helper injects them into every strategy's dataframe as columns, with a 1-day shift to prevent look-ahead bias. Generated strategies can gate entries on `dataframe['vix'] < 25` or compose a Fear & Greed composite (`dataframe['fgi']`).
 
-**2. Strategy Factory**
+### 2b. Crypto positioning (funding rate, open interest)
 
-Every Sunday, the system automatically generates new trading strategies:
+Binance Futures public API gives 333 days of 8h-funding-rate history and 500 days of daily open-interest data in one call each. Generated strategies see `btc_funding_rate`, `btc_oi`, `btc_oi_pct_change_24h`. Funding > 0.0005 means market is long-loaded (exhaustion risk); negative OI change is forced de-leveraging.
+
+### 2c. Alt-strength regime (ETH/BTC proxy)
+
+Binance spot daily ETH/USDT ÷ BTC/USDT, plus a 30-day rolling z-score. Real BTC dominance from market cap requires a paid CoinGecko tier; this proxy correlates with BTC.D at ~-0.85 because ETH is the dominant alt. The LLM sees `eth_btc_ratio`, `eth_btc_change_7d`, `alt_strength_zscore_30d`.
+
+### 2d. Per-trade macro attribution
+
+After each backtest, every closed trade is bucketed by the macro context that was in effect at entry time (fgi, vix, funding, OI change, alt-strength). Bucket win-rates are aggregated and stored as JSON next to the backtest record. This is the raw signal the reflector and the next generation cycle consume.
+
+### 3. JSON spec → codegen
+
+Free-form Python from an LLM is brittle (forgotten imports, wrong column names, invalid threshold semantics). Instead, the LLM emits a structured JSON spec (`{indicators, params, entry: {core, macro_confidence, macro_min_confidence}, exit, risk}`) and a renderer writes Python that's correct by construction. Entry conditions split into `core` (all must be true) and `macro_confidence` (fraction must clear threshold) — solves the "5 ANDs of macro filters means entries never fire" problem.
+
+### 4. Hyperopt rescue
+
+Marginal failures (`FAIL_TOO_FEW` or `FAIL_UNPROFITABLE` with > 0 trades) go through Freqtrade's hyperopt on Sunday 04:00 UTC. The LLM declares parameter ranges via `IntParameter`/`DecimalParameter`; hyperopt searches them. Rescued strategies (post-hyperopt re-backtest meets promote criteria) flip from retired → active.
+
+### 5. Critic pass
+
+After generation, a second LLM call reviews the rendered code for over-constrained logic (6+ AND conditions), missing NaN guards, threshold sanity errors, regime/logic mismatch, and uncaught look-ahead. Returns PASS / WARN / REJECT. REJECT triggers a regeneration with the critic's feedback in the retry prompt. WARN proceeds. Errors are non-blocking (synthetic PASS) — the critic adds signal, it doesn't gate.
+
+### 6. Iterative refinement
+
+After generation + critic, a 90-day mini-backtest runs. If it fails acceptance (< 5 trades OR profit ≤ 0 AND sharpe ≤ 0), the diagnostic ("ZERO TRADES — loosen filters or lower macro_min_confidence" / "UNPROFITABLE — reconsider thesis") is fed back into a second generation turn. Up to 2 turns total. Best-scoring attempt is kept if neither passes. Live trial showed a strategy rescued from 0 trades to 25 trades, Sharpe 1.72.
+
+### 7. Pipeline gates (defensive layer)
+
+Between the full backtest and the promote decision, four gates evaluate the result:
+
+- **Regime-conditional floor**: lowers the min-trades threshold by the fraction of the lookback window that was in the strategy's target regime. A breakout strategy in a 0.3% breakout window shouldn't need 20 trades.
+- **Beat-buy-and-hold**: strategy must clear 70% of BTC HODL profit OR be materially safer (5+pp lower drawdown). When BH is negative, the floor caps at 0.
+- **Walk-forward** (opt-in, env-gated): N consecutive sub-windows; requires majority of windows positive AND sharpe std below threshold. Catches "one lucky month carried the full backtest".
+- **Correlation**: rejects candidates with Pearson > 0.7 on daily returns against any already-active strategy. No point running two strategies that lose at the same time.
+
+Each gate returns a verdict. Retirements are tagged with the first failing gate's code (`FAIL_BH`, `FAIL_REGIME`, `FAIL_CORRELATION`, etc.) so failure memory captures specific reasons.
+
+### Reflector + generator feedback loops
+
+- **Reflector** (weekly, Sunday 03:00 UTC): an LLM reads the week's instance performance, regime state, registry stats, and **the per-strategy attribution data**, then writes a markdown reflection naming cross-strategy patterns (e.g. "fgi_fear appeared in top-positive for 4/6 recent ranging strategies").
+- **Generator** (weekly, Sunday 02:00 UTC): reads recent reflections AND aggregates attribution patterns per regime (with pool-wide fallback when a regime has < 3 attributed strategies). The prompt gets a `HISTORICAL ATTRIBUTION PATTERNS` block listing the consistent winners and losers.
+
+This is what closes the loop. Earlier iterations had reflection text but the generator never saw the underlying evidence — now both layers see the same data, at different granularities.
+
+## What runs when
+
+| Job | Schedule | What it does |
+|---|---|---|
+| `fetch_macro` | daily 00:05 UTC | Yahoo macro + Binance perp + ETH/BTC spot |
+| `classify_regime` | daily 00:10 UTC | indicator-based regime (ADX + EMA + vol) |
+| `llm_regime_override` | daily 00:12 UTC | LLM looks at macro data, may override regime |
+| `apply_regime` | daily 00:15 UTC | start/stop freqtrade instances based on regime |
+| `generate_strategies` | Sunday 02:00 UTC | 5 strategies × iterative × all the feedback loops |
+| `backtest_candidates` | Sunday 02:30 UTC | full backtest + attribution + gates + promote/retire |
+| `reflector` | Sunday 03:00 UTC | weekly LLM review with attribution evidence |
+| `hyperopt_candidates` | Sunday 04:00 UTC | rescue marginal failures via parameter search |
+| `check_risk` | every 5 min | drawdown monitoring + kill switch |
+| `health_check` | every 2 min | instance liveness |
+
+## Configuration & tweaking
+
+### LLM provider (`.env`)
 
 ```
-  Claude API              Validation Pipeline          Backtest Runner
- ┌──────────┐            ┌──────────────────┐         ┌──────────────┐
- │ Generate │───────────▶│ 1. Security      │────────▶│ Stage 1:     │
- │ Python   │  .py file  │ 2. Syntax        │ passed  │ 30-day mini  │
- │ strategy │            │ 3. Look-ahead    │         │              │
- │ code     │            │ 4. Structure     │         │ Stage 2:     │
- └──────────┘            │ 5. Spot-only     │         │ 6-month full │
-                         └──────────────────┘         └──────┬───────┘
-                                                             │
-                                                             ▼
-                                                     ┌──────────────┐
-                                                     │  Strategy    │
-                                                     │  Registry    │
-                                                     │  (SQLite)    │
-                                                     │              │
-                                                     │  candidate   │
-                                                     │  → active    │
-                                                     │  → retired   │
-                                                     └──────────────┘
+LLM_PROVIDER=deepseek          # or "anthropic"
+DEEPSEEK_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...   # serves as automatic fallback if primary fails
 ```
 
-- **Generation**: Claude writes a complete Freqtrade strategy in Python, targeting a specific market regime
-- **Validation**: 5-stage pipeline rejects unsafe code (no `exec/eval`, no file I/O, no network, no look-ahead bias, no shorting)
-- **Backtesting**: 2-stage evaluation — quick 30-day filter, then full 6-month backtest via sandboxed Docker container
-- **Registry**: SQLite database tracks strategy lifecycle (candidate → active → retired), max 10 active / 30 candidates
+The wrapper in `user_data/scripts/llm_client.py` dispatches to either Anthropic SDK or the openai SDK (with custom `base_url`). To add a new OpenAI-compatible provider (OpenRouter, Together, Groq), add one entry to `PROVIDER_DEFAULTS`:
 
-**3. Risk Management**
+```python
+"openrouter": {
+    "model": "openai/gpt-4o",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "base_url": "https://openrouter.ai/api/v1",
+    "kind": "openai_compat",
+},
+```
 
-- **Kill switch**: All trading stops if total drawdown reaches -10%
-- **Daily limit**: -3% max daily drawdown
-- **Crisis mode**: Detected regime = `crisis` stops all instances
-- Risk limits are hardcoded and cannot be changed by the LLM
+No new client code needed.
 
-**4. Monitoring**
+### Trading instances (`user_data/scripts/orchestrator.py`)
 
-- **Dashboard**: HTTP server on port 8888 with real-time system status
-- **Telegram** (optional): Alerts for regime changes, kill switch triggers, LLM failures
-- **Weekly reflections**: Claude reviews the past week's trades and writes analysis to markdown
+The `INSTANCES` dict at the top of the file controls regime routing:
 
-## Project Structure
+```python
+INSTANCES = {
+    "sweep":    {"url": "http://ft-sweep:8080",    "strategy": "LiquiditySweepStrategy",  "regimes": ["ranging"]},
+    "momentum": {"url": "http://ft-momentum:8080", "strategy": "MomentumTrendStrategy",   "regimes": ["trending", "breakout"]},
+}
+```
+
+To deploy an LLM-promoted strategy: copy its `.py` from `user_data/strategies/candidates/` to `user_data/strategies/`, add a new instance to `docker-compose.yml`, register it here, restart orchestrator.
+
+### Risk limits (orchestrator)
+
+```python
+RISK_LIMITS = {
+    "max_drawdown_daily_pct": 3.0,
+    "max_drawdown_total_pct": 10.0,     # kill switch
+    "crisis_regime_action": "stop_all",
+}
+```
+
+These are **hardcoded by design** — the LLM cannot change them. If you want different limits, edit them here.
+
+### Generation cadence + count
+
+In `orchestrator.job_generate_strategies`:
+
+```python
+generate_batch(count=5, regimes=["trending", "ranging", "breakout", "all", "trending"],
+               iterative=True, max_turns=2, ...)
+```
+
+To generate more strategies per week, bump `count` and add regimes. To skip the iterative refinement (faster but lower quality), set `iterative=False`. To allow more refinement turns, raise `max_turns` (each turn = 1 generation + 1 mini-backtest).
+
+### Gate thresholds (`user_data/scripts/pipeline_gates.py`)
+
+- `gate_regime_conditional_floor(base_min_trades=20, absolute_min_trades=5)` — adjust the trade-count floor.
+- `gate_beat_buyhold(profit_floor_ratio=0.7, drawdown_advantage_pct=5.0)` — tighten or loosen the HODL bar.
+- `gate_walk_forward(min_passing_windows=2, max_sharpe_std=1.5)` — change OOS robustness requirements.
+- `gate_correlation(threshold=0.7, min_overlap_days=30)` — how correlated is "too correlated".
+
+Walk-forward is opt-in (expensive — N× backtest). Enable per run with `R7_WALK_FORWARD=1` in the environment.
+
+### Per-instance Freqtrade configs
+
+Each freqtrade instance needs its own config with API keys. The repo gitignores `user_data/configs/` to keep secrets out of git. Minimal config shape:
+
+```json
+{
+  "max_open_trades": 3,
+  "stake_currency": "USDT",
+  "stake_amount": 100,
+  "timeframe": "1h",
+  "dry_run": false,
+  "exchange": {
+    "name": "okx",
+    "key": "YOUR_OKX_KEY",
+    "secret": "YOUR_OKX_SECRET",
+    "password": "YOUR_OKX_PASSPHRASE",
+    "ccxt_config": {"hostname": "www.okx.com"},
+    "pair_whitelist": ["BTC/USDT"]
+  },
+  "api_server": {
+    "enabled": true, "listen_ip_address": "0.0.0.0", "listen_port": 8080,
+    "username": "freqtrader", "password": "CHANGE_ME"
+  }
+}
+```
+
+For OKX demo trading, point `ccxt_config.hostname` at `www.okx.com` and use a demo API key (created from the OKX demo trading section).
+
+## Project structure
 
 ```
 first-duck-trade/
-├── docker-compose.yml                  # 5 services: sweep, momentum, backtest, orchestrator, monitor
+├── docker-compose.yml              # 4 services: sweep, momentum, orchestrator, monitor
 ├── docker/
-│   ├── Dockerfile.orchestrator         # Python + Docker CLI (for backtest runner)
+│   ├── Dockerfile.orchestrator     # Python + Docker CLI (for backtest_runner)
 │   └── requirements-orchestrator.txt
+├── .env.example                    # template — copy to .env
 ├── user_data/
-│   ├── configs/                        # Per-instance Freqtrade configs (gitignored, contains API keys)
-│   │   ├── config-sweep.json           #   OKX demo trading config for sweep instance
-│   │   └── config-momentum.json        #   OKX demo trading config for momentum instance
-│   ├── config.json                     # Backtest config (dry_run, no API keys)
+│   ├── config.json                 # shared backtest config
+│   ├── configs/                    # per-instance live configs (gitignored)
 │   ├── strategies/
-│   │   ├── LiquiditySweepStrategy.py   # Ranging market: liquidity sweep detection
-│   │   ├── MomentumTrendStrategy.py    # Trending market: EMA crossover + ADX
-│   │   ├── base_generated.py           # Base class for LLM-generated strategies
-│   │   └── candidates/                 # LLM-generated strategies land here
+│   │   ├── LiquiditySweepStrategy.py
+│   │   ├── MomentumTrendStrategy.py
+│   │   ├── base_generated.py       # base class for LLM strategies
+│   │   └── candidates/             # LLM-generated strategies (gitignored)
 │   ├── indicators/
-│   │   ├── regime_detector.py          # Market regime classification
-│   │   ├── fear_and_greed.py           # Fear & Greed index
-│   │   ├── chaikin_money_flow.py       # CMF indicator
-│   │   └── whale_liquidity.py          # Whale tracking
+│   │   ├── regime_detector.py      # ADX + EMA + vol regime classification
+│   │   ├── fear_and_greed.py       # composite FGI + external loader
+│   │   ├── perp_metrics.py         # funding rate + OI joins
+│   │   ├── alt_strength.py         # ETH/BTC ratio + z-score
+│   │   ├── external_data.py        # umbrella add_external_data()
+│   │   ├── chaikin_money_flow.py
+│   │   └── whale_liquidity.py
 │   ├── scripts/
-│   │   ├── orchestrator.py             # Main scheduler — regime, risk, strategy routing
-│   │   ├── strategy_generator.py       # Claude API → Python strategy code
-│   │   ├── validation_pipeline.py      # 5-stage security + quality checks
-│   │   ├── backtest_runner.py          # Docker-in-Docker backtest execution
-│   │   ├── strategy_registry.py        # SQLite strategy lifecycle management
-│   │   ├── fetch_extra_data.py         # VIX, Gold, DXY, SPX from Yahoo Finance
-│   │   ├── monitor.py                  # Dashboard HTTP server
-│   │   └── notifier.py                 # Telegram alerts
-│   ├── data/                           # OHLCV data, regime/risk state, registry DB
-│   └── backtest_results/
-├── tests/                              # pytest suite (46 tests)
-├── TODOS.md                            # Phase-based development roadmap
-└── .env                                # API keys (gitignored)
+│   │   ├── orchestrator.py         # APScheduler — runs all jobs
+│   │   ├── llm_client.py           # provider-agnostic chat wrapper (DeepSeek/Claude/...)
+│   │   ├── strategy_generator.py   # LLM → JSON spec → Python
+│   │   ├── strategy_spec.py        # spec validator + Python renderer
+│   │   ├── strategy_critic.py      # second-LLM code review
+│   │   ├── validation_pipeline.py  # AST checks (no exec, no I/O, no look-ahead)
+│   │   ├── backtest_runner.py     # docker-in-docker backtest + hyperopt
+│   │   ├── pipeline_gates.py       # regime/buyhold/walk-forward/correlation gates
+│   │   ├── trade_attribution.py    # per-trade macro bucket attribution + aggregation
+│   │   ├── strategy_registry.py    # SQLite lifecycle (candidate/active/retired)
+│   │   ├── fetch_extra_data.py     # Yahoo macro fetcher
+│   │   ├── fetch_perp_data.py      # Binance perp futures fetcher
+│   │   ├── fetch_eth_btc.py        # Binance spot ETH/BTC fetcher
+│   │   ├── monitor.py              # dashboard HTTP server (port 8888)
+│   │   └── notifier.py             # Telegram alerts
+│   ├── data/                       # OHLCV, regime state, registry DB (gitignored)
+│   └── backtest_results/           # per-call trade exports (gitignored)
+└── tests/                          # 251 tests, pytest
 ```
 
-## Tech Stack
+## Testing
 
-| Component | Technology |
-|-----------|-----------|
+```bash
+# Run the full suite (mocked LLM calls — doesn't need API keys)
+docker exec ft-orchestrator python -m pytest /app/tests -q
+
+# Specific area
+docker exec ft-orchestrator python -m pytest /app/tests/test_pipeline_gates.py -v
+```
+
+251 tests cover: validation pipeline, regime detection, indicator math, LLM client (both providers + fallback), strategy spec + critic + iterative generator, pipeline gates (all four), trade attribution (math + reflector/generator consumption), registry lifecycle, hyperopt rescue.
+
+## Tech stack
+
+| Component | Tech |
+|---|---|
 | Trading engine | [Freqtrade](https://github.com/freqtrade/freqtrade) (Docker) |
-| Strategy generation | Claude API (Anthropic SDK) |
-| Job scheduling | APScheduler |
-| Orchestration | Docker Compose (5 containers) |
-| Strategy registry | SQLite |
-| Technical analysis | pandas_ta, numpy, pandas |
-| Macro data | yfinance |
+| Default LLM | DeepSeek V4 Pro (OpenAI-compatible API) |
+| Fallback LLM | Anthropic Claude (auto-retry on primary failure) |
+| Scheduling | APScheduler |
+| Orchestration | Docker Compose (4 services) |
+| Registry | SQLite |
+| TA | pandas_ta, numpy, pandas |
+| Macro data | yfinance (VIX/GOLD/DXY/SPX), Binance public API (perp + spot) |
 | Testing | pytest |
 
-## Notes
+## Status
 
-- Currently in **Phase 4: Paper Trading** on OKX demo
-- Exchange: **OKX** (spot, USDT pairs: BTC, ETH, SOL, XRP)
-- Strategy generation runs weekly on **Sunday 02:00 UTC**
-- See `TODOS.md` for development roadmap
+- **Phase 4: Paper trading** on OKX demo (BTC/USDT spot, can be expanded)
+- All 7 rounds of the factory loop are live (R1 failure memory through R7 gates)
+- Reflector and generator both consume attribution data
+- DeepSeek V4 Pro is the default LLM with automatic Anthropic fallback
+- Cron runs weekly on Sunday — first full DeepSeek-powered cycle fires automatically
+
+## What's intentionally NOT done yet
+
+- **Adaptive `macro_min_confidence`** — letting the spec renderer auto-tune the macro confidence threshold based on per-bucket attribution lift. Designed but deferred until enough live attribution data accumulates to validate the tuning rule.
+- **Pool diversification dashboard** — pairwise correlation heatmap, rolling top-lift buckets, week-over-week alpha decay tracking. The data is in the registry; the monitor doesn't surface it yet.
+- **Real BTC dominance** — currently using ETH/BTC ratio as a free proxy (~-0.85 correlation with mcap-based BTC.D). Upgrade to real BTC.D requires a paid CoinGecko tier.
+
+## License
+
+See LICENSE.
