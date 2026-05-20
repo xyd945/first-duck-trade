@@ -17,7 +17,7 @@ least one full day before T.
 
 import pandas as pd
 
-from .fear_and_greed import load_external_dataframe
+from .fear_and_greed import load_external_dataframe, resolve_target_index
 
 
 def _join_external_metric(
@@ -27,20 +27,26 @@ def _join_external_metric(
     column: str,
     lookback_offset: pd.Timedelta,
 ) -> pd.Series:
-    """Load a metric series from disk and align it onto `dataframe.index`.
+    """Load a metric series from disk and align it onto the dataframe's rows.
 
     `lookback_offset` is added to every source timestamp before reindexing —
     that's the look-ahead guard. For an 8h-cadence series we add 8h so a
     bar at 09:00 sees the funding rate that settled at 00:00 (8h earlier),
     not 08:00 (which a naive ffill would otherwise expose).
+
+    Returns a Series aligned to ``dataframe.index`` (the caller's index) so
+    ``.values`` and assignment work uniformly, regardless of whether the
+    underlying alignment was by DatetimeIndex or by a 'date' column.
     """
     src = load_external_dataframe(pair, timeframe)
     if src.empty:
         return pd.Series(pd.NA, index=dataframe.index)
     shifted = src["close"].copy()
     shifted.index = shifted.index + lookback_offset
+    target_index = resolve_target_index(dataframe)
     try:
-        return shifted.reindex(dataframe.index, method="ffill")
+        aligned = shifted.reindex(target_index, method="ffill")
+        return pd.Series(aligned.values, index=dataframe.index)
     except (TypeError, ValueError):
         return pd.Series(pd.NA, index=dataframe.index)
 

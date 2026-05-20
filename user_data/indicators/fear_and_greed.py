@@ -4,6 +4,24 @@ import numpy as np
 import json
 from pathlib import Path
 
+def resolve_target_index(dataframe: pd.DataFrame) -> pd.Index:
+    """Return an index whose labels match the dataframe's rows in time.
+
+    Freqtrade hands strategies a RangeIndex with a ``date`` column. Manual
+    tests and notebooks typically use a true DatetimeIndex. External-data
+    reindex calls must align on timestamps either way — if we reindex onto
+    a RangeIndex when the source has a DatetimeIndex, every label misses
+    and the result is silently all-NaN (which silently disabled vix, gold,
+    dxy, spx, btc_funding_rate, btc_oi for every Freqtrade backtest until
+    this was discovered).
+    """
+    if isinstance(dataframe.index, pd.DatetimeIndex):
+        return dataframe.index
+    if 'date' in dataframe.columns:
+        return pd.DatetimeIndex(dataframe['date'])
+    return dataframe.index
+
+
 def load_external_dataframe(pair_name: str, timeframe: str = '1d', data_dir: str = 'user_data/data/binance') -> pd.DataFrame:
     """
     Load external data (VIX/USDT, GOLD/USDT) from JSON files fetched by fetch_extra_data.py.
