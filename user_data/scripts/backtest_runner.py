@@ -220,12 +220,18 @@ def parse_backtest_output(output: str, strategy_name: str, timerange: str = None
             r"│\s*TOTAL\s*│\s*(\d+)\s*│", output, default=0, cast=int
         )
 
-    # Profit
+    # Profit. The summary table at the top uses ABBREVIATED column headers
+    # ("Tot Profit %", "Tot Profit USDT") — those strings appear in the
+    # output but as table headers, not data rows, so matching them grabs
+    # the *next column header* and the regex group capture fails silently
+    # → default 0.0 → every strategy looks "unprofitable".
+    # The summary metrics table at the bottom uses different labels:
+    # "Total profit %" and "Absolute profit". Those are the data rows.
     result["profit_total_pct"] = extract_value(
-        r"Tot Profit %\s*│\s*([-\d.]+)", output, default=0.0
+        r"Total profit %\s*│\s*([-\d.]+)", output, default=0.0
     )
     result["profit_total_abs"] = result.get("profit_total_abs") or extract_value(
-        r"Tot Profit USDT\s*│\s*([-\d.]+)", output, default=0.0
+        r"Absolute profit\s*│\s*([-\d.]+)", output, default=0.0
     )
 
     # Drawdown

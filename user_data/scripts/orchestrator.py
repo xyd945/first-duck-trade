@@ -689,7 +689,12 @@ def job_backtest_candidates():
             log.warning(f"  macro snapshot build failed; attribution will be skipped: {e}")
             macro_df = None
 
-        for cand in candidates[:10]:  # Cap at 10 per run to limit compute
+        # Phase 6 can produce up to 20 strategies per generation (10
+        # archetypes × 20-cell coherence matrix). Cap was 10 — sized for
+        # the pre-Phase-6 ~3-5/week cadence — so 10+ strategies would
+        # silently skip the full backtest and stay unevaluated. 25 covers
+        # the matrix output plus a small buffer.
+        for cand in candidates[:25]:
             name = cand["name"]
             target_regime = cand.get("target_regime", "all")
             log.info(f"  Backtesting: {name} (regime={target_regime})")
