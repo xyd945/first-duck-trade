@@ -103,3 +103,19 @@ def test_fetch_ohlcv_scheduled_weekly_before_generation():
     assert fetch_idx < gen_idx, "fetch_ohlcv must be scheduled before generate_strategies in source"
     # Confirm the cron expression itself
     assert 'day_of_week="sat", hour=19, minute=30, id="fetch_ohlcv"' in src
+
+
+def test_backtest_cap_covers_phase_6_matrix():
+    """job_backtest_candidates must process enough strategies to cover one
+    full Phase 6 generation (20-cell coherence matrix). Earlier cap was 10
+    and silently dropped 5+ candidates from a 15-strategy registration
+    batch, leaving them with no full backtest scoring."""
+    src = (ROOT / "user_data" / "scripts" / "orchestrator.py").read_text()
+    # Find the for-loop that iterates candidates
+    import re
+    m = re.search(r"for cand in candidates\[:(\d+)\]:", src)
+    assert m, "expected `for cand in candidates[:N]:` slicing in job_backtest_candidates"
+    cap = int(m.group(1))
+    assert cap >= 20, (
+        f"backtest cap is {cap}; must be >= 20 to cover Phase 6's 20-cell matrix output"
+    )
