@@ -480,9 +480,13 @@ HARD RULES — your spec will be rejected if any of these are violated:
    0/1 and requires the mean to clear `macro_min_confidence` (0.3-0.7 typical).
    You can list 5 macro signals — they DON'T all need to fire. This is the
    point of having two buckets. Use it.
-3. Every condition in `entry.core` MUST reference a column that exists either
-   in the base OHLCV (open/high/low/close/volume), in your `indicators[]`, or
-   in the external-data columns listed below.
+3. Every `dataframe['x']` reference in `entry.core`, `entry.macro_confidence`,
+   or `exit.core` MUST trace back to a declared column: base OHLCV
+   (open/high/low/close/volume), an `indicators[]` declaration (Form A name
+   or Form B columns[].name), or the external-data list below. The validator
+   cross-checks this — referencing an undeclared column (e.g. using
+   `dataframe['rsi']` in exit but not adding RSI to indicators) is
+   auto-rejected with the list of columns you actually declared.
 4. Use `.shift(1)` on every column reference in `entry.core` that compares
    "what just happened" — never compare today's close to today's indicator,
    that's same-bar look-ahead.
@@ -492,6 +496,30 @@ HARD RULES — your spec will be rejected if any of these are violated:
    breaks the column lookup.
 6. SPOT, LONG-ONLY. No `can_short`. No short conditions.
 7. risk.stoploss must be negative. Suggested range -0.03 to -0.10.
+8. Each `indicators[]` entry uses EXACTLY ONE of two forms. Mixing them is the
+   #1 LLM-produced bug in this pipeline and is auto-rejected by the validator.
+
+INDICATOR FORMS — pick exactly one per entry:
+
+  Form A (single column, inline): assign directly to dataframe in `compute`,
+  NO `columns` block.
+    {"compute": "dataframe['rsi'] = ta.rsi(dataframe['close'], length=14)"}
+
+  Form B (multi-column, local var): `compute` introduces a local variable,
+  `columns` extracts named values from it. The renderer turns each entry
+  into `dataframe['<name>'] = <source>`.
+    {"compute": "bb = ta.bbands(dataframe['close'], length=20, std=2.0)",
+     "columns": [
+       {"name": "bb_lower", "source": "bb['BBL_20_2.0']"},
+       {"name": "bb_upper", "source": "bb['BBU_20_2.0']"}
+     ]}
+
+  WRONG — DO NOT WRITE THIS. The renderer would emit two assignments; the
+  second references an undefined local. The validator rejects it.
+    {"compute": "dataframe['ema_20'] = ta.ema(dataframe['close'], length=20)",
+     "columns": [{"name": "ema_20", "source": "dataframe['ema_20']"}]}
+    Reason: `compute` already assigned to dataframe. The `columns` block
+    must NOT be present. Drop it, or switch to Form B with a local var.
 
 EXTERNAL DATA COLUMNS (always available, the renderer wires them in):
   dataframe['fgi']                     Fear & Greed composite. Negative = fear (contrarian-long signal).
