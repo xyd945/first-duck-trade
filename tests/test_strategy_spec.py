@@ -126,6 +126,126 @@ def test_bad_param_type_raises():
 
 
 # ---------------------------------------------------------------------------
+# Column reference cross-check
+# Both failure patterns observed in real LLM output across multiple trials.
+# ---------------------------------------------------------------------------
+
+def test_undeclared_column_in_exit_raises():
+    """Trial #2 cell 1: exit referenced dataframe['rsi'] but indicators
+    never computed RSI → KeyError at backtest, burning the cell."""
+    from strategy_spec import validate_spec, SpecError
+    spec = _valid_spec()
+    # Drop the indicator that declares 'rsi'
+    spec["indicators"] = [
+        {"compute": "bb = ta.bbands(dataframe['close'], length=20, std=2.0)",
+         "columns": [{"name": "bb_lower", "source": "bb['BBL_20_2.0']"}]},
+    ]
+    # Entry/exit still reference dataframe['rsi'] and dataframe['bb_lower']
+    spec["entry"]["core"] = ["dataframe['rsi'] < 30"]
+    spec["exit"]["core"] = ["dataframe['rsi'] > 70"]
+    with pytest.raises(SpecError, match="references dataframe.*'rsi'"):
+        validate_spec(spec)
+
+
+def test_undeclared_column_in_entry_core_raises():
+    from strategy_spec import validate_spec, SpecError
+    spec = _valid_spec()
+    spec["entry"]["core"] = ["dataframe['nonexistent_col'] > 0"]
+    with pytest.raises(SpecError, match="entry.core references dataframe.*'nonexistent_col'"):
+        validate_spec(spec)
+
+
+def test_undeclared_column_in_macro_confidence_raises():
+    from strategy_spec import validate_spec, SpecError
+    spec = _valid_spec()
+    spec["entry"]["macro_confidence"] = ["dataframe['made_up_macro'] < 1"]
+    with pytest.raises(SpecError, match="entry.macro_confidence references"):
+        validate_spec(spec)
+
+
+def test_ohlcv_columns_are_implicitly_declared():
+    """open/high/low/close/volume must always be valid without an indicator."""
+    from strategy_spec import validate_spec
+    spec = _valid_spec()
+    spec["entry"]["core"] = ["dataframe['close'] > dataframe['open']"]
+    spec["exit"]["core"] = ["dataframe['rsi'] > 70"]  # rsi declared in fixture
+    validate_spec(spec)  # must not raise
+
+
+def test_macro_columns_are_implicitly_declared():
+    """fgi/vix/funding_rate/etc are added by add_external_data() — implicit."""
+    from strategy_spec import validate_spec
+    spec = _valid_spec()
+    spec["entry"]["macro_confidence"] = [
+        "dataframe['fgi'] < 0",
+        "dataframe['vix'] < 25",
+        "dataframe['btc_funding_rate'] < 0.0003",
+        "dataframe['eth_btc_ratio'] > 0.05",
+    ]
+    validate_spec(spec)
+
+
+def test_inline_compute_with_columns_block_raises():
+    """Trial #2 cell 2: compute had inline `dataframe['dc_upper'] = ...`
+    AND a columns block with `{name: dc_upper, source: dc_upper}`. The
+    renderer emitted `dataframe['dc_upper'] = dc_upper` referencing an
+    undefined local → NameError at backtest."""
+    from strategy_spec import validate_spec, SpecError
+    spec = _valid_spec()
+    spec["indicators"] = [{
+        "compute": "dataframe['dc_upper'] = ta.donchian(dataframe['high'], dataframe['low'], length=20)['DCU_20_20']",
+        "columns": [{"name": "dc_upper", "source": "dc_upper"}],
+    }]
+    spec["entry"]["core"] = ["dataframe['dc_upper'] > 0"]
+    spec["exit"]["core"] = ["dataframe['rsi'] > 70"]
+    with pytest.raises(SpecError, match="BOTH an inline.*assignment.*AND a 'columns' block"):
+        validate_spec(spec)
+
+
+def test_inline_compute_without_columns_passes():
+    """The renderer supports `dataframe['x'] = ta.foo(...)` as a single line.
+    That's the canonical pattern — must not be rejected."""
+    from strategy_spec import validate_spec
+    spec = _valid_spec()
+    spec["indicators"] = [
+        {"compute": "dataframe['ema_20'] = ta.ema(dataframe['close'], length=20)"},
+    ]
+    spec["entry"]["core"] = ["dataframe['close'] > dataframe['ema_20']"]
+    spec["exit"]["core"] = ["dataframe['close'] < dataframe['ema_20']"]
+    validate_spec(spec)
+
+
+def test_columns_block_with_local_var_compute_passes():
+    """The canonical multi-column pattern: compute introduces a local var,
+    columns extract from it. Renderer adds the `dataframe['x'] = ...`."""
+    from strategy_spec import validate_spec
+    spec = _valid_spec()
+    spec["indicators"] = [{
+        "compute": "macd = ta.macd(dataframe['close'])",
+        "columns": [
+            {"name": "macd_line", "source": "macd['MACD_12_26_9']"},
+            {"name": "macd_hist", "source": "macd['MACDh_12_26_9']"},
+        ],
+    }]
+    spec["entry"]["core"] = ["dataframe['macd_hist'] > 0", "dataframe['macd_line'] > 0"]
+    spec["exit"]["core"] = ["dataframe['macd_hist'] < 0"]
+    validate_spec(spec)
+
+
+def test_error_message_lists_available_indicator_columns():
+    """Failure message should help the LLM self-correct on the next turn."""
+    from strategy_spec import validate_spec, SpecError
+    spec = _valid_spec()  # declares bb_lower, bb_mid, rsi
+    spec["entry"]["core"] = ["dataframe['ema_50'] > 0"]
+    with pytest.raises(SpecError) as exc:
+        validate_spec(spec)
+    msg = str(exc.value)
+    # Should list what IS available so the LLM knows what to add or fix
+    assert "bb_lower" in msg
+    assert "rsi" in msg
+
+
+# ---------------------------------------------------------------------------
 # render_strategy
 # ---------------------------------------------------------------------------
 

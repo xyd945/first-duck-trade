@@ -37,6 +37,55 @@ REQUIRED_FIELDS = (
 )
 
 
+# Columns the renderer guarantees are present without any indicator declaration:
+# OHLCV from Freqtrade + macro columns from add_external_data().
+_OHLCV_COLUMNS = frozenset(("open", "high", "low", "close", "volume"))
+_MACRO_COLUMNS = frozenset((
+    "fgi", "vix", "gold", "dxy", "spx",
+    "btc_funding_rate", "btc_oi", "btc_oi_pct_change_24h",
+    "eth_btc_ratio", "eth_btc_change_7d", "alt_strength_zscore_30d",
+))
+
+
+# Catches `dataframe['x']` and `dataframe["x"]` references. Used both for
+# detecting assignments in compute strings (when followed by `=`) and for
+# detecting references in entry/exit conditions.
+_COL_REF_RE = re.compile(r"""dataframe\[\s*['"]([^'"\]]+)['"]\s*\]""")
+_COL_ASSIGN_RE = re.compile(r"""dataframe\[\s*['"]([^'"\]]+)['"]\s*\]\s*=(?!=)""")
+
+
+def _declared_columns(spec: dict) -> set[str]:
+    """Set of column names that will exist on the dataframe at entry/exit time.
+
+    Includes OHLCV, macro injected by add_external_data, plus anything an
+    indicator declares — either via inline ``dataframe['x'] = ...`` in its
+    compute string, or via the ``columns: [{name: x, source: ...}]`` block
+    (the renderer turns each into ``dataframe['x'] = <source>``).
+    """
+    declared = set(_OHLCV_COLUMNS) | set(_MACRO_COLUMNS)
+    for ind in spec.get("indicators", []):
+        for m in _COL_ASSIGN_RE.finditer(ind.get("compute", "")):
+            declared.add(m.group(1))
+        for col in ind.get("columns", []):
+            name = col.get("name") if isinstance(col, dict) else None
+            if name:
+                declared.add(name)
+    return declared
+
+
+def _condition_strings(spec: dict) -> list[tuple[str, str]]:
+    """Yield (section, condition_string) pairs from entry/exit logic."""
+    out = []
+    entry = spec.get("entry", {})
+    for c in entry.get("core", []) or []:
+        out.append(("entry.core", c))
+    for c in entry.get("macro_confidence", []) or []:
+        out.append(("entry.macro_confidence", c))
+    for c in (spec.get("exit", {}).get("core", []) or []):
+        out.append(("exit.core", c))
+    return out
+
+
 class SpecError(ValueError):
     """Raised when a spec is structurally invalid (renderer would crash)."""
 
@@ -101,6 +150,42 @@ def validate_spec(spec: dict) -> None:
     for ind in spec["indicators"]:
         if not isinstance(ind, dict) or "compute" not in ind:
             raise SpecError(f"each indicator must have a 'compute' field, got {ind!r}")
+        # An indicator that does `dataframe['x'] = ...` inline in its compute
+        # AND also declares a `columns` block produces TWO assignments — the
+        # second one is `dataframe['x'] = x` referencing a local var that was
+        # never bound (the inline assign skipped the local). Caught
+        # empirically: this was the NameError-class failure in trial #2.
+        compute = ind["compute"]
+        has_inline_assign = bool(_COL_ASSIGN_RE.search(compute))
+        has_columns = bool(ind.get("columns"))
+        if has_inline_assign and has_columns:
+            raise SpecError(
+                "indicator has BOTH an inline `dataframe['x'] = ...` "
+                "assignment in 'compute' AND a 'columns' block. The renderer "
+                "would emit a second `dataframe['x'] = x` referencing an "
+                "undefined local variable. Use one form: either inline "
+                "assignment with no columns, OR a local-var compute "
+                f"(e.g. `bb = ta.bbands(...)`) with columns. Got: {ind!r}"
+            )
+
+    # Cross-check: every dataframe['x'] referenced in entry/exit conditions
+    # must be available — declared by an indicator, OHLCV, or macro. Without
+    # this, a spec that uses `dataframe['rsi']` in exit but forgets to
+    # compute rsi crashes at backtest time with KeyError, wasting an LLM
+    # turn (this was the KeyError-class failure across multiple trials).
+    declared = _declared_columns(spec)
+    for section, cond in _condition_strings(spec):
+        for m in _COL_REF_RE.finditer(cond):
+            col = m.group(1)
+            if col not in declared:
+                indicator_cols = sorted(declared - _OHLCV_COLUMNS - _MACRO_COLUMNS)
+                raise SpecError(
+                    f"{section} references dataframe[{col!r}] but no "
+                    f"indicator declares this column. Declared indicators: "
+                    f"{indicator_cols}. (OHLCV and macro columns are also "
+                    f"available without declaration.) Offending condition: "
+                    f"{cond!r}"
+                )
 
     for p in spec["params"]:
         if not all(k in p for k in ("name", "type", "default", "space")):
