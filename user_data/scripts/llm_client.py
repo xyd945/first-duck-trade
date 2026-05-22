@@ -71,6 +71,37 @@ def default_provider() -> str:
     return os.environ.get("LLM_PROVIDER", "deepseek").lower()
 
 
+# Default request timeout. A DeepSeek V4 Pro reasoning-model generation
+# typically takes 30-180s; 300s leaves comfortable headroom while still
+# catching the silent-stall failure mode (trials #4 and #6 both hung for
+# 2+ hours waiting on a stream body that never arrived). Override via
+# LLM_REQUEST_TIMEOUT_SECONDS.
+_DEFAULT_REQUEST_TIMEOUT_SECONDS = 300
+
+
+def request_timeout_seconds() -> float:
+    """Per-request HTTP timeout passed to the underlying SDK clients.
+    Read at call time so tests/operators can override at runtime."""
+    raw = os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS")
+    if not raw:
+        return float(_DEFAULT_REQUEST_TIMEOUT_SECONDS)
+    try:
+        val = float(raw)
+    except ValueError:
+        log.warning(
+            f"LLM_REQUEST_TIMEOUT_SECONDS={raw!r} is not a number; "
+            f"using default {_DEFAULT_REQUEST_TIMEOUT_SECONDS}s"
+        )
+        return float(_DEFAULT_REQUEST_TIMEOUT_SECONDS)
+    if val <= 0:
+        log.warning(
+            f"LLM_REQUEST_TIMEOUT_SECONDS={val} must be positive; "
+            f"using default {_DEFAULT_REQUEST_TIMEOUT_SECONDS}s"
+        )
+        return float(_DEFAULT_REQUEST_TIMEOUT_SECONDS)
+    return val
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -144,7 +175,7 @@ def _call_anthropic(cfg, messages, system, model, max_tokens):
     if not api_key:
         raise RuntimeError(f"{cfg['api_key_env']} not set")
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key, timeout=request_timeout_seconds())
     kwargs = {
         "model": model or cfg["model"],
         "max_tokens": max_tokens,
@@ -166,7 +197,11 @@ def _call_openai_compat(cfg, messages, system, model, max_tokens):
     if not api_key:
         raise RuntimeError(f"{cfg['api_key_env']} not set")
 
-    client = openai.OpenAI(api_key=api_key, base_url=cfg["base_url"])
+    client = openai.OpenAI(
+        api_key=api_key,
+        base_url=cfg["base_url"],
+        timeout=request_timeout_seconds(),
+    )
 
     # OpenAI-format: system is the first message in the list, not a separate kwarg.
     full_messages = []
