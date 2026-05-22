@@ -28,21 +28,24 @@ services:
       - FT_SWEEP_API_PASSWORD=${FT_SWEEP_API_PASSWORD:-}
     ports:
       - "127.0.0.1:8081:8080"
-    # Render the runtime config from its template (substituting the env
-    # vars above) BEFORE exec'ing freqtrade. exec replaces the shell so
-    # signal handling, restart-on-crash, and the process tree all behave
-    # exactly as they did before.
+    # Render the runtime config to /tmp (container-only, NOT host-mounted)
+    # before exec'ing freqtrade. The previous version wrote into
+    # user_data/configs/, which is bind-mounted from the host — so the
+    # cleartext secrets ended up on host disk anyway. /tmp inside the
+    # container is ephemeral, owner-only via chmod 0600 from the render
+    # script, and gone on container restart. exec replaces the shell so
+    # signal handling and restart-on-crash behave exactly as before.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
         python /freqtrade/user_data/scripts/render_config.py \
           /freqtrade/user_data/configs/config-sweep.json.template \
-          /freqtrade/user_data/configs/config-sweep.json
+          /tmp/config-sweep.json
         exec freqtrade trade \
           --logfile /freqtrade/user_data/logs/ft-sweep.log \
           --db-url sqlite:////freqtrade/user_data/tradesv3-sweep.sqlite \
-          --config /freqtrade/user_data/configs/config-sweep.json \
+          --config /tmp/config-sweep.json \
           --strategy LiquiditySweepStrategy
 
   # ==========================================================================
@@ -63,17 +66,18 @@ services:
       - FT_MOMENTUM_API_PASSWORD=${FT_MOMENTUM_API_PASSWORD:-}
     ports:
       - "127.0.0.1:8082:8080"
+    # See ft-sweep above for the /tmp-render rationale — same pattern.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
         python /freqtrade/user_data/scripts/render_config.py \
           /freqtrade/user_data/configs/config-momentum.json.template \
-          /freqtrade/user_data/configs/config-momentum.json
+          /tmp/config-momentum.json
         exec freqtrade trade \
           --logfile /freqtrade/user_data/logs/ft-momentum.log \
           --db-url sqlite:////freqtrade/user_data/tradesv3-momentum.sqlite \
-          --config /freqtrade/user_data/configs/config-momentum.json \
+          --config /tmp/config-momentum.json \
           --strategy MomentumTrendStrategy
 
   # ==========================================================================
@@ -115,6 +119,7 @@ services:
     volumes:
       - "./user_data:/app/user_data"
       - "./docker-compose.yml:/app/docker-compose.yml:ro"  # Needed by backtest_runner
+      - "./tests:/app/tests:ro"  # So `docker exec ft-orchestrator pytest tests/` works
       - "/var/run/docker.sock:/var/run/docker.sock"  # Docker socket for container management
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
