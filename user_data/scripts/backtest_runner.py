@@ -402,9 +402,33 @@ def parse_backtest_output(output: str, strategy_name: str, timerange: str = None
     return result
 
 
-def run_mini_backtest(strategy_name: str, days: int = 30, **kwargs) -> dict:
-    """Stage 1: Quick 30-day backtest to filter obviously broken strategies."""
-    end = datetime.now(timezone.utc)
+def run_mini_backtest(
+    strategy_name: str,
+    days: int = 90,
+    skip_recent_days: int = 30,
+    **kwargs,
+) -> dict:
+    """Stage 1: out-of-sample backtest to filter overfit strategies.
+
+    Window: [today - skip_recent_days - days, today - skip_recent_days].
+    Default = [today - 120, today - 30], a 90-day slice ending one month
+    before the full backtest's most-recent data.
+
+    Why out-of-sample. The orchestrator's full backtest uses all available
+    data (~200 days). When mini also covered the most recent 90 days,
+    strategies overfit to that slice scored well in mini and then blew up
+    in full — observed in trials #5 and #6 (e.g. cell 19 mini sharpe 1.91,
+    full sharpe -2.74). Skipping the most recent 30 days keeps that slice
+    out of the mini's view, so a strategy that wins both runs has actually
+    generalized across two non-overlapping regimes (in expectation) rather
+    than just memorized one.
+
+    90-day length is preserved because the rendered strategy declares
+    startup_candle_count=200; a 30-day window leaves too little prelude
+    and Freqtrade exits with "no data left after adjusting for startup
+    candles". 90 days = 2160 1h candles, comfortable headroom.
+    """
+    end = datetime.now(timezone.utc) - timedelta(days=skip_recent_days)
     start = end - timedelta(days=days)
     timerange = f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
 
