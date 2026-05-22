@@ -116,3 +116,157 @@ def test_parser_handles_missing_profit_section_gracefully():
     r = parse_backtest_output(truncated, "X")
     assert r["profit_total_pct"] == 0.0
     assert r["profit_total_abs"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# parse_backtest_artifact — JSON-from-zip path
+#
+# Captured 2026-05-20 from the actual Freqtrade artifact for
+# RsiBbVolumeMeanReversion (the strategy that auto-promoted in trial #6).
+# Only the fields the parser reads are kept; structure matches Freqtrade's
+# real output verbatim so a future SDK change is caught by these tests.
+# ---------------------------------------------------------------------------
+
+import json as _json
+import zipfile as _zipfile
+
+from backtest_runner import parse_backtest_artifact
+
+
+REAL_ARTIFACT_STRATEGY = {
+    "strategy_name": "RsiBbVolumeMeanReversion",
+    "total_trades": 27,
+    "profit_total": 0.01884796886,        # decimal — must surface as 1.88 (pct)
+    "profit_total_abs": 18.84796886,
+    "profit_mean": 0.006970329926738167,  # decimal
+    "max_drawdown_account": 0.011587980598572837,  # decimal — must surface as 1.16 (pct)
+    "max_drawdown_abs": 11.807714939999997,
+    "sharpe": 0.6535700690953908,
+    "sortino": 0.5395559754062101,
+    "profit_factor": 1.987207967642965,
+    "winrate": 0.7407407407407407,        # decimal — must surface as 74.07 (pct)
+    "holding_avg": "2 days, 23:40:00",
+    "backtest_days": 209,
+    "starting_balance": 1000,
+}
+
+
+def _make_artifact_zip(tmp_path, strategy_payload, strategy_name="RsiBbVolumeMeanReversion"):
+    """Build a tiny zip in the exact shape Freqtrade emits."""
+    zip_path = tmp_path / "backtest-result.zip"
+    payload = {
+        "strategy": {strategy_name: strategy_payload},
+        "strategy_comparison": [],
+    }
+    with _zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("backtest-result.json", _json.dumps(payload))
+        zf.writestr("backtest-result_config.json", "{}")  # parser must ignore
+    return zip_path
+
+
+def test_artifact_parses_canonical_real_strategy(tmp_path):
+    """End-to-end: every field the previous regex parser produced must
+    be present and correctly typed when sourced from the JSON."""
+    zip_path = _make_artifact_zip(tmp_path, REAL_ARTIFACT_STRATEGY)
+    r = parse_backtest_artifact(zip_path, "RsiBbVolumeMeanReversion")
+    assert r["success"] is True
+    assert r["total_trades"] == 27
+    # Decimals → percentages (matches what parse_backtest_output returns)
+    assert round(r["profit_total_pct"], 2) == 1.88
+    assert r["profit_total_abs"] == 18.84796886
+    assert round(r["max_drawdown_pct"], 2) == 1.16
+    assert r["max_drawdown_abs"] == 11.807714939999997
+    assert r["sharpe"] == 0.6535700690953908
+    assert r["sortino"] == 0.5395559754062101
+    assert r["profit_factor"] == 1.987207967642965
+    assert round(r["win_rate"], 2) == 74.07
+    assert r["avg_duration"] == "2 days, 23:40:00"
+    assert r["backtest_days"] == 209
+
+
+def test_artifact_unit_conversion_matches_console_parser(tmp_path):
+    """Critical invariant: both parsers must report the same unit for
+    profit_total_pct (percentage), so callers don't see a silent 100×
+    change when the source flips between artifact and console."""
+    # Console parser returned -0.11 (percentage) for the same magnitude
+    # of decimal -0.0011. Artifact parser must do the same conversion.
+    zip_path = _make_artifact_zip(tmp_path, {
+        **REAL_ARTIFACT_STRATEGY,
+        "profit_total": -0.0011,
+    })
+    r = parse_backtest_artifact(zip_path, "RsiBbVolumeMeanReversion")
+    assert round(r["profit_total_pct"], 2) == -0.11
+
+
+def test_artifact_winrate_converted_to_percentage(tmp_path):
+    """JSON gives winrate as a decimal; the established API surfaces a
+    percentage. Regression check — earlier console parser returned win%
+    like 43.6, not 0.436."""
+    zip_path = _make_artifact_zip(tmp_path, {**REAL_ARTIFACT_STRATEGY, "winrate": 0.436})
+    r = parse_backtest_artifact(zip_path, "RsiBbVolumeMeanReversion")
+    assert round(r["win_rate"], 1) == 43.6
+
+
+def test_artifact_falls_back_to_max_relative_drawdown(tmp_path):
+    """If max_drawdown_account is absent (older Freqtrade or edge case),
+    use max_relative_drawdown without crashing."""
+    payload = {**REAL_ARTIFACT_STRATEGY}
+    del payload["max_drawdown_account"]
+    payload["max_relative_drawdown"] = 0.0234
+    zip_path = _make_artifact_zip(tmp_path, payload)
+    r = parse_backtest_artifact(zip_path, "RsiBbVolumeMeanReversion")
+    assert round(r["max_drawdown_pct"], 2) == 2.34
+
+
+def test_artifact_raises_when_strategy_not_in_payload(tmp_path):
+    """Misnamed strategy → caller should hit the fallback path with a
+    clear error rather than getting garbage zeros."""
+    zip_path = _make_artifact_zip(tmp_path, REAL_ARTIFACT_STRATEGY,
+                                  strategy_name="DifferentStrategy")
+    with pytest.raises(ValueError, match="not in artifact"):
+        parse_backtest_artifact(zip_path, "RsiBbVolumeMeanReversion")
+
+
+def test_artifact_raises_on_empty_zip(tmp_path):
+    """Corrupt / no-JSON zip → caller falls back to console parsing."""
+    zip_path = tmp_path / "empty.zip"
+    with _zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("README.txt", "not a backtest result")
+    with pytest.raises(ValueError, match="no result JSON"):
+        parse_backtest_artifact(zip_path, "RsiBbVolumeMeanReversion")
+
+
+def test_artifact_ignores_config_json(tmp_path):
+    """Freqtrade also writes <ts>_config.json into the same zip. The
+    parser must skip it and find the actual result JSON instead."""
+    # _make_artifact_zip already includes a _config.json — if the parser
+    # wrongly grabbed it the test would fail at the strategy lookup.
+    zip_path = _make_artifact_zip(tmp_path, REAL_ARTIFACT_STRATEGY)
+    r = parse_backtest_artifact(zip_path, "RsiBbVolumeMeanReversion")
+    assert r["total_trades"] == 27
+
+
+def test_artifact_handles_zero_trade_strategy(tmp_path):
+    """A strategy that compiles but fires no entries — Freqtrade still
+    writes a result JSON, but everything is zero-valued. Parser must
+    not divide-by-zero or NoneType-explode."""
+    zip_path = _make_artifact_zip(tmp_path, {
+        "strategy_name": "Empty",
+        "total_trades": 0,
+        "profit_total": 0.0,
+        "profit_total_abs": 0.0,
+        "profit_mean": 0.0,
+        "max_drawdown_account": 0.0,
+        "max_drawdown_abs": 0.0,
+        "sharpe": 0.0,
+        "sortino": 0.0,
+        "profit_factor": 0.0,
+        "winrate": 0.0,
+        "holding_avg": "",
+        "backtest_days": 90,
+        "starting_balance": 1000,
+    }, strategy_name="Empty")
+    r = parse_backtest_artifact(zip_path, "Empty")
+    assert r["total_trades"] == 0
+    assert r["profit_total_pct"] == 0.0
+    assert r["sharpe"] == 0.0
