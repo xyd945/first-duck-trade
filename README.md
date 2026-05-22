@@ -16,12 +16,17 @@ cd first-duck-trade
 # 2. Configure
 cp .env.example .env
 # Edit .env — fill in:
-#   DEEPSEEK_API_KEY   (https://platform.deepseek.com)
-#   ANTHROPIC_API_KEY  (optional; serves as auto-fallback if DeepSeek errors)
-#   TELEGRAM_TOKEN / TELEGRAM_CHAT_ID  (optional; for alerts)
-mkdir -p user_data/configs
-# Create user_data/configs/config-sweep.json and config-momentum.json
-# (Freqtrade configs with your OKX demo API keys; see "Per-instance configs" below)
+#   DEEPSEEK_API_KEY        (https://platform.deepseek.com)
+#   ANTHROPIC_API_KEY       (optional; auto-fallback if DeepSeek errors)
+#   OKX_API_KEY / SECRET / PASSPHRASE   (from OKX demo trading)
+#   FT_MOMENTUM_API_PASSWORD            (any random string)
+#   FT_SWEEP_API_PASSWORD               (any random string)
+#   FT_MOMENTUM_JWT_SECRET / FT_SWEEP_JWT_SECRET   (any random 32+ chars)
+#   TELEGRAM_TOKEN / TELEGRAM_CHAT_ID   (optional; for alerts)
+
+# user_data/configs/config-{sweep,momentum}.json are RENDERED at container
+# startup from the committed *.json.template files; you don't write them by
+# hand. The render fails fast if any of the env vars above are missing.
 
 # 3. Download historical data (one-time, ~3-5 min)
 docker compose run --rm freqtrade-sweep download-data \
