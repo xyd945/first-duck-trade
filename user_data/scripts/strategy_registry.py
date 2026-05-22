@@ -346,10 +346,23 @@ def get_active_strategies() -> list:
 
 
 def get_candidates() -> list:
-    """Get all candidate strategies."""
+    """Get all candidate strategies, oldest first (FIFO).
+
+    Order matters because ``job_backtest_candidates`` processes a bounded
+    slice per run (currently 25). With newest-first ordering, a candidate
+    that lands at position 26+ on Sunday never gets evaluated — and the
+    next Sunday it's even further back as fresh generations push it down,
+    until archetype-eviction retires it without ever scoring it. FIFO
+    guarantees every candidate eventually gets a full backtest, at most
+    one week after registration assuming weekly generation stays below
+    the per-run cap. ``id ASC`` tiebreaks deterministic ordering when
+    two candidates share a ``created_at`` second (common in batch
+    registration).
+    """
     conn = get_db()
     rows = conn.execute(
-        "SELECT * FROM strategies WHERE status = 'candidate' ORDER BY created_at DESC"
+        "SELECT * FROM strategies WHERE status = 'candidate' "
+        "ORDER BY created_at ASC, id ASC"
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]

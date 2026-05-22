@@ -690,10 +690,14 @@ def job_backtest_candidates():
             macro_df = None
 
         # Phase 6 can produce up to 20 strategies per generation (10
-        # archetypes × 20-cell coherence matrix). Cap was 10 — sized for
-        # the pre-Phase-6 ~3-5/week cadence — so 10+ strategies would
-        # silently skip the full backtest and stay unevaluated. 25 covers
-        # the matrix output plus a small buffer.
+        # archetypes × 20-cell coherence matrix). 25 covers the matrix
+        # output plus a small buffer.
+        #
+        # get_candidates() returns FIFO (oldest first). If a run produces
+        # more than 25 ACCEPTED candidates, the overflow waits in the
+        # pool and gets evaluated the FOLLOWING Sunday — never skipped
+        # outright. This bounds worst-case latency to ~2 weeks rather
+        # than letting older candidates starve forever.
         for cand in candidates[:25]:
             name = cand["name"]
             target_regime = cand.get("target_regime", "all")
