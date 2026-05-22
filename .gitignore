@@ -6,7 +6,11 @@ AGENTS.md
 
 # User specific configurations (API keys, etc.)
 user_data/config.json
-user_data/configs/
+# Match every file inside user_data/configs/ but NOT subdirectories — keeps
+# the rendering templates trackable. (A directory-level ignore here would
+# block git from descending, so `!*.template` couldn't re-include them.)
+user_data/configs/*.json
+user_data/configs/.*
 
 # Freqtrade download data
 user_data/data/

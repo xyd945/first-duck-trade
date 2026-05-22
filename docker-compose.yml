@@ -17,14 +17,33 @@ services:
       # So generated strategies' `from indicators.* import ...` resolves
       # from the bind-mounted user_data/indicators/ package.
       - PYTHONPATH=/freqtrade/user_data
+      # Secrets used by render_config.py to materialize config-sweep.json
+      # from its committed template at container startup. The ${VAR:-}
+      # default-empty form lets docker compose start; the render script
+      # fails fast with a clear error if any required var is missing.
+      - OKX_API_KEY=${OKX_API_KEY:-}
+      - OKX_API_SECRET=${OKX_API_SECRET:-}
+      - OKX_API_PASSPHRASE=${OKX_API_PASSPHRASE:-}
+      - FT_SWEEP_JWT_SECRET=${FT_SWEEP_JWT_SECRET:-}
+      - FT_SWEEP_API_PASSWORD=${FT_SWEEP_API_PASSWORD:-}
     ports:
       - "127.0.0.1:8081:8080"
-    command: >
-      trade
-      --logfile /freqtrade/user_data/logs/ft-sweep.log
-      --db-url sqlite:////freqtrade/user_data/tradesv3-sweep.sqlite
-      --config /freqtrade/user_data/configs/config-sweep.json
-      --strategy LiquiditySweepStrategy
+    # Render the runtime config from its template (substituting the env
+    # vars above) BEFORE exec'ing freqtrade. exec replaces the shell so
+    # signal handling, restart-on-crash, and the process tree all behave
+    # exactly as they did before.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        python /freqtrade/user_data/scripts/render_config.py \
+          /freqtrade/user_data/configs/config-sweep.json.template \
+          /freqtrade/user_data/configs/config-sweep.json
+        exec freqtrade trade \
+          --logfile /freqtrade/user_data/logs/ft-sweep.log \
+          --db-url sqlite:////freqtrade/user_data/tradesv3-sweep.sqlite \
+          --config /freqtrade/user_data/configs/config-sweep.json \
+          --strategy LiquiditySweepStrategy
 
   # ==========================================================================
   # Strategy Instance: MomentumTrendStrategy (trending/breakout)
@@ -37,14 +56,25 @@ services:
       - "./user_data:/freqtrade/user_data"
     environment:
       - PYTHONPATH=/freqtrade/user_data
+      - OKX_API_KEY=${OKX_API_KEY:-}
+      - OKX_API_SECRET=${OKX_API_SECRET:-}
+      - OKX_API_PASSPHRASE=${OKX_API_PASSPHRASE:-}
+      - FT_MOMENTUM_JWT_SECRET=${FT_MOMENTUM_JWT_SECRET:-}
+      - FT_MOMENTUM_API_PASSWORD=${FT_MOMENTUM_API_PASSWORD:-}
     ports:
       - "127.0.0.1:8082:8080"
-    command: >
-      trade
-      --logfile /freqtrade/user_data/logs/ft-momentum.log
-      --db-url sqlite:////freqtrade/user_data/tradesv3-momentum.sqlite
-      --config /freqtrade/user_data/configs/config-momentum.json
-      --strategy MomentumTrendStrategy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        python /freqtrade/user_data/scripts/render_config.py \
+          /freqtrade/user_data/configs/config-momentum.json.template \
+          /freqtrade/user_data/configs/config-momentum.json
+        exec freqtrade trade \
+          --logfile /freqtrade/user_data/logs/ft-momentum.log \
+          --db-url sqlite:////freqtrade/user_data/tradesv3-momentum.sqlite \
+          --config /freqtrade/user_data/configs/config-momentum.json \
+          --strategy MomentumTrendStrategy
 
   # ==========================================================================
   # Backtest Runner (on-demand, not always running)
@@ -94,6 +124,11 @@ services:
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - HOST_PROJECT_DIR=${PWD}
+      # Must MATCH the values rendered into the corresponding freqtrade
+      # configs; the orchestrator uses these for HTTP basic auth against
+      # the per-instance REST APIs.
+      - FT_MOMENTUM_API_PASSWORD=${FT_MOMENTUM_API_PASSWORD:-}
+      - FT_SWEEP_API_PASSWORD=${FT_SWEEP_API_PASSWORD:-}
     depends_on:
       - freqtrade-sweep
       - freqtrade-momentum

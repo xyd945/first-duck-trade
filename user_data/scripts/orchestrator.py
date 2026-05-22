@@ -55,19 +55,28 @@ DATA_DIR = BASE_DIR / "data"
 REGIME_STATE_FILE = BASE_DIR / "data" / "regime_state.json"
 RISK_STATE_FILE = BASE_DIR / "data" / "risk_state.json"
 
-# Freqtrade instance endpoints (container names resolve via Docker networking)
+# Freqtrade instance endpoints (container names resolve via Docker networking).
+# REST API credentials live in env vars rather than committed source — the
+# values here must match what the corresponding Freqtrade containers see
+# via their config templates (FT_{NAME}_API_PASSWORD). Defaults preserve
+# the prior literals so a developer can still run the orchestrator without
+# wiring env vars first, but production deploys must override.
+def _instance_password(env_var: str, default: str) -> str:
+    return os.environ.get(env_var, default)
+
+
 INSTANCES = {
     "sweep": {
         "url": "http://ft-sweep:8080",
-        "username": "freqtrader",
-        "password": "CHANGE_ME_sweep_password",
+        "username": os.environ.get("FT_SWEEP_API_USERNAME", "freqtrader"),
+        "password": _instance_password("FT_SWEEP_API_PASSWORD", "CHANGE_ME_sweep_password"),
         "strategy": "LiquiditySweepStrategy",
         "regimes": ["ranging"],  # Active in these regimes
     },
     "momentum": {
         "url": "http://ft-momentum:8080",
-        "username": "freqtrader",
-        "password": "CHANGE_ME_momentum_password",
+        "username": os.environ.get("FT_MOMENTUM_API_USERNAME", "freqtrader"),
+        "password": _instance_password("FT_MOMENTUM_API_PASSWORD", "CHANGE_ME_momentum_password"),
         "strategy": "MomentumTrendStrategy",
         "regimes": ["trending", "breakout"],  # Active in these regimes
     },
