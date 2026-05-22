@@ -345,4 +345,8 @@ docker exec ft-orchestrator python -m pytest /app/tests/test_pipeline_gates.py -
 
 ## License
 
-See LICENSE.
+First Duck Trade is licensed under the **GNU Affero General Public License v3.0 or later** (`AGPL-3.0-or-later`).
+
+That means you can use it for personal or commercial purposes, but if you distribute modified versions or run modified versions as a network service, you must make the corresponding source code available under the same license. Copyright notices and attribution must be preserved.
+
+If you use this project in your own work, please cite or credit **xyd945 / First Duck Trade**. See [CITATION.cff](CITATION.cff).
