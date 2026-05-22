@@ -9,6 +9,18 @@ Uses the sandboxed backtest container (no network, resource limits) for safety
 when testing LLM-generated strategies.
 
 Results are parsed and returned as structured dicts for the strategy registry.
+
+Result parsing has two paths:
+
+  * ``parse_backtest_artifact`` reads the strongly-typed JSON Freqtrade writes
+    into its export zip. Preferred when ``export_trades=True``.
+  * ``parse_backtest_output`` scrapes the console table as a fallback for
+    runs that didn't request an export (e.g. mini-backtests).
+
+The console scraper has been the source of two silent-zero bugs (the
+``Tot Profit %`` column-header collision fix in PR #30 most recently). The
+artifact path is far more robust because the values come typed from
+Freqtrade itself, not regex-extracted from a Rich table layout.
 """
 
 import json
@@ -16,6 +28,7 @@ import logging
 import os
 import subprocess
 import sys
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -159,16 +172,39 @@ def run_backtest(
                 "raw_output": last_lines,
             }
 
-        # Parse results from output
-        result = parse_backtest_output(output, strategy_name, timerange)
+        # Parse results. Prefer the JSON artifact when an export was
+        # requested — it ships typed values straight from Freqtrade and
+        # sidesteps the entire console-regex bug class. Fall back to
+        # console parsing if the artifact is missing/corrupt OR if no
+        # export was requested (the mini-backtest path).
+        result = None
         if export_host_dir is not None:
-            # Auto-named file in our per-call subdir. There should be exactly
-            # one .zip; if Freqtrade ever writes multiple, take the newest.
             zips = sorted(export_host_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime)
             if zips:
-                result["trades_export_path"] = str(zips[-1])
+                zip_path = zips[-1]
+                try:
+                    result = parse_backtest_artifact(zip_path, strategy_name, timerange)
+                    result["trades_export_path"] = str(zip_path)
+                    # Preserve the tail of console output for debugging — the
+                    # artifact JSON has the metrics, but logs/warnings live in
+                    # stdout/stderr only.
+                    result.setdefault("raw_output", last_lines)
+                except Exception as e:
+                    log.warning(
+                        f"artifact parse failed for {strategy_name} "
+                        f"({type(e).__name__}: {e}); falling back to console parse"
+                    )
+                    result = None
             else:
                 log.warning(f"export requested but no zip in {export_host_dir}")
+
+        if result is None:
+            result = parse_backtest_output(output, strategy_name, timerange)
+            if export_host_dir is not None:
+                zips = sorted(export_host_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime)
+                if zips:
+                    result["trades_export_path"] = str(zips[-1])
+
         return result
 
     except subprocess.TimeoutExpired:
@@ -183,6 +219,84 @@ def run_backtest(
             "strategy": strategy_name,
             "error": str(e),
         }
+
+
+def parse_backtest_artifact(
+    zip_path: Path | str,
+    strategy_name: str,
+    timerange: str | None = None,
+) -> dict:
+    """Parse Freqtrade's exported backtest JSON inside its result zip.
+
+    Freqtrade writes ``backtest-result-<ts>.json`` into the zip alongside
+    the trades feather. That JSON contains every metric we previously
+    scraped from the console table — but typed, in canonical units,
+    straight from Freqtrade's own writer. No regex layer to drift when
+    a column header changes upstream.
+
+    The returned dict has the same shape as ``parse_backtest_output``
+    so downstream consumers (orchestrator, strategy_registry,
+    strategy_generator's diagnostic) don't need to branch.
+
+    Raises if the zip is missing, corrupted, or the JSON doesn't contain
+    the expected strategy entry. The caller is expected to catch and
+    fall back to console parsing.
+    """
+    zip_path = Path(zip_path)
+
+    with zipfile.ZipFile(zip_path) as zf:
+        json_names = [
+            n for n in zf.namelist()
+            if n.endswith(".json") and "_config" not in n
+        ]
+        if not json_names:
+            raise ValueError(f"no result JSON inside {zip_path.name}")
+        with zf.open(json_names[0]) as fh:
+            data = json.load(fh)
+
+    strategies = data.get("strategy", {})
+    if strategy_name not in strategies:
+        # Freqtrade names the entry by the class, which is what we passed
+        # as --strategy. If it's missing, the run probably failed to load
+        # or registered under a different name — surface that explicitly.
+        raise ValueError(
+            f"strategy {strategy_name!r} not in artifact (found: {list(strategies)})"
+        )
+    s = strategies[strategy_name]
+
+    # Freqtrade stores most ratios as decimals (0.0188 = 1.88%, 0.74 = 74%).
+    # Our pre-existing API exposes these as percentages — keep that contract
+    # so the registry / orchestrator / generator diagnostics don't see a
+    # silent 100× change when the parser path switches.
+    def _pct(decimal_value):
+        return float(decimal_value) * 100.0 if decimal_value is not None else 0.0
+
+    # Drawdown: prefer max_drawdown_account (true equity-curve drawdown);
+    # fall back to max_relative_drawdown if Freqtrade ever stops emitting
+    # the first one. Both are decimals.
+    dd_decimal = s.get("max_drawdown_account")
+    if dd_decimal is None:
+        dd_decimal = s.get("max_relative_drawdown", 0.0)
+
+    return {
+        "success": True,
+        "strategy": strategy_name,
+        "timerange": timerange or s.get("timerange") or "all",
+        "total_trades": int(s.get("total_trades", 0)),
+        "profit_total_pct": _pct(s.get("profit_total")),
+        "profit_total_abs": float(s.get("profit_total_abs", 0.0)),
+        "profit_avg_pct": _pct(s.get("profit_mean")),
+        "max_drawdown_pct": _pct(dd_decimal),
+        "max_drawdown_abs": float(s.get("max_drawdown_abs", 0.0)),
+        "sharpe": float(s.get("sharpe", 0.0)),
+        "sortino": float(s.get("sortino", 0.0)),
+        "profit_factor": float(s.get("profit_factor", 0.0)),
+        # winrate is decimal in JSON (0.74), pct elsewhere (74)
+        "win_rate": _pct(s.get("winrate")),
+        "avg_duration": s.get("holding_avg", ""),
+        "backtest_days": int(s.get("backtest_days", 0)),
+        "starting_balance": float(s.get("starting_balance", 0.0)),
+    }
 
 
 def parse_backtest_output(output: str, strategy_name: str, timerange: str = None) -> dict:
