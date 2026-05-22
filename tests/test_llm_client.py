@@ -273,3 +273,111 @@ def test_unknown_provider_raises(monkeypatch):
             [{"role": "user", "content": "hi"}],
             provider="not_a_real_provider", fallback_provider=None,
         )
+
+
+# ---------------------------------------------------------------------------
+# Request timeout
+#
+# Trials #4 and #6 both hung for 2+ hours waiting on a DeepSeek HTTP
+# stream body that never arrived. Without a per-request timeout, a stalled
+# connection burns the entire trial. These tests pin the timeout plumbing
+# so a future SDK upgrade or refactor can't silently drop it.
+# ---------------------------------------------------------------------------
+
+def test_default_request_timeout_when_env_unset(monkeypatch):
+    from llm_client import request_timeout_seconds
+    monkeypatch.delenv("LLM_REQUEST_TIMEOUT_SECONDS", raising=False)
+    assert request_timeout_seconds() == 300.0
+
+
+def test_request_timeout_overridable_via_env(monkeypatch):
+    from llm_client import request_timeout_seconds
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "45")
+    assert request_timeout_seconds() == 45.0
+
+
+def test_request_timeout_ignores_garbage_env(monkeypatch):
+    from llm_client import request_timeout_seconds
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "not-a-number")
+    assert request_timeout_seconds() == 300.0
+
+
+def test_request_timeout_ignores_non_positive_env(monkeypatch):
+    from llm_client import request_timeout_seconds
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "-5")
+    assert request_timeout_seconds() == 300.0
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "0")
+    assert request_timeout_seconds() == 300.0
+
+
+def test_anthropic_client_receives_timeout(monkeypatch):
+    """The Anthropic SDK client must be instantiated with our timeout so a
+    stalled HTTP read can't hang the whole trial."""
+    from llm_client import chat_completion
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "120")
+    fake_anth, _ = _patched_anthropic()
+
+    with patch.dict("sys.modules", {"anthropic": fake_anth}):
+        chat_completion(
+            [{"role": "user", "content": "hi"}],
+            provider="anthropic", fallback_provider=None,
+        )
+    init_kwargs = fake_anth.Anthropic.call_args.kwargs
+    assert init_kwargs["timeout"] == 120.0
+
+
+def test_openai_client_receives_timeout(monkeypatch):
+    """Same plumbing for the OpenAI-compat client (used by DeepSeek)."""
+    from llm_client import chat_completion
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "90")
+    fake_openai, _ = _patched_openai()
+
+    with patch.dict("sys.modules", {"openai": fake_openai}):
+        chat_completion(
+            [{"role": "user", "content": "hi"}],
+            provider="deepseek", fallback_provider=None,
+        )
+    init_kwargs = fake_openai.OpenAI.call_args.kwargs
+    assert init_kwargs["timeout"] == 90.0
+
+
+def test_timeout_uses_default_when_env_unset(monkeypatch):
+    """End-to-end: with LLM_REQUEST_TIMEOUT_SECONDS unset, the SDK client
+    still gets a finite timeout (the 300s default), not None."""
+    from llm_client import chat_completion
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+    monkeypatch.delenv("LLM_REQUEST_TIMEOUT_SECONDS", raising=False)
+    fake_openai, _ = _patched_openai()
+
+    with patch.dict("sys.modules", {"openai": fake_openai}):
+        chat_completion(
+            [{"role": "user", "content": "hi"}],
+            provider="deepseek", fallback_provider=None,
+        )
+    init_kwargs = fake_openai.OpenAI.call_args.kwargs
+    assert init_kwargs["timeout"] == 300.0
+    assert init_kwargs["timeout"] is not None
+
+
+def test_timeout_failure_triggers_fallback(monkeypatch):
+    """When primary times out (any exception from the SDK), the wrapper's
+    existing fallback path must still fire — so a hung DeepSeek doesn't
+    just propagate as a bare TimeoutError to the orchestrator."""
+    from llm_client import chat_completion
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+
+    fake_openai, fake_openai_client = _patched_openai()
+    fake_openai_client.chat.completions.create.side_effect = TimeoutError(
+        "stream stalled at byte 0"
+    )
+    fake_anth, _ = _patched_anthropic("rescued by claude")
+
+    with patch.dict("sys.modules", {"openai": fake_openai, "anthropic": fake_anth}):
+        out = chat_completion(
+            [{"role": "user", "content": "hi"}],
+            provider="deepseek", fallback_provider="anthropic",
+        )
+    assert out == "rescued by claude"
