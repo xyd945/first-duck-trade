@@ -1,3 +1,6 @@
+# Claude Code assistant memory (local-only context, not for sharing)
+AGENTS.md
+
 # Environment variables (API keys)
 .env
 
