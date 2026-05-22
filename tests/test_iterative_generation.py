@@ -188,8 +188,10 @@ def test_iterative_bails_on_generation_failure():
     assert mock_gen.call_count == 1  # bailed after first generation failure
 
 
-def test_iterative_accepts_unprofitable_if_sharpe_positive():
-    """profit > 0 OR sharpe > 0 — either alone is enough."""
+def test_iterative_rejects_unprofitable_even_when_sharpe_positive():
+    """Acceptance now requires profit AND sharpe both positive. The old
+    OR-clause let near-zero-edge strategies through (trials #5/#6 saw
+    ~60% of those die in full backtest), so we tightened to AND."""
     from strategy_generator import generate_and_iterate
 
     bt = {"success": True, "total_trades": 50, "profit_total_pct": -0.1, "sharpe": 0.2}
@@ -198,7 +200,7 @@ def test_iterative_accepts_unprofitable_if_sharpe_positive():
             target_regime="all", max_turns=3,
             backtest_fn=lambda name: bt,
         )
-    assert result["accepted"] is True
+    assert result["accepted"] is False
 
 
 def test_iterative_rejects_if_below_min_trades_floor():

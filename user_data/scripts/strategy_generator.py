@@ -816,7 +816,7 @@ def generate_and_iterate(
     provider: str | None = None,
     archetype: str | None = None,
     max_turns: int = 3,
-    accept_min_trades: int = 5,
+    accept_min_trades: int = 10,
     backtest_fn=None,
 ) -> dict:
     """Generate → mini-backtest → refine, up to max_turns times.
@@ -824,30 +824,30 @@ def generate_and_iterate(
     On each turn:
       1. Call generate_strategy (which already does validation + critic with
          their own internal retries).
-      2. Run a 30-day mini backtest on the generated file.
+      2. Run an out-of-sample 90-day mini-backtest on a slice that ends
+         30 days before today — the orchestrator's full backtest will
+         re-evaluate on all data including those 30 most-recent days.
       3. Score the result. ACCEPT if trades >= accept_min_trades AND
-         (profit > 0 OR sharpe > 0). The bar is deliberately low — the real
-         quality gate is the orchestrator's full backtest + hyperopt later.
+         profit > 0 AND sharpe > 0. Looser-than-full thresholds (full
+         requires trades >= 20), but tightened from the original
+         "profit > 0 OR sharpe > 0" because trials #5/#6 showed that
+         OR-acceptance let near-zero-edge strategies through, then they
+         consumed full-backtest slots and got retired anyway.
       4. If not accepted and turns remain, append a structured backtest
          diagnostic to existing_results and loop.
       5. After max_turns, return the BEST attempt seen (most trades + best
          profit) with `iterated=True` and `turns_used=N` flags.
 
-    backtest_fn is injected for testability. Defaults to backtest_runner.run_mini_backtest.
+    backtest_fn is injected for testability. Defaults to backtest_runner.run_mini_backtest
+    with its out-of-sample window defaults.
     """
     if backtest_fn is None:
         # Lazy import — avoids hard dep when only the generator is exercised in tests.
-        # We deliberately do NOT use run_mini_backtest (30 days): the strategy's
-        # startup_candle_count is 200, and freqtrade requires ALL of those to live
-        # before the timerange start. 30 days = 720 1h candles which doesn't leave
-        # enough history room — Freqtrade trims to zero usable data and exits
-        # with "no data left after adjusting for startup candles". 90 days gives
-        # 2160 candles, comfortably accommodating the 200-candle prelude.
         sys.path.insert(0, str(BASE_DIR / "scripts"))
         from backtest_runner import run_mini_backtest
 
         def backtest_fn(strategy_name: str) -> dict:
-            return run_mini_backtest(strategy_name, days=90)
+            return run_mini_backtest(strategy_name)
 
     best: dict | None = None
     best_score = -float("inf")
@@ -893,11 +893,13 @@ def generate_and_iterate(
             best_score = score
             best = {**gen, "mini_backtest": bt, "turn": turn + 1}
 
-        # Acceptance check — low bar, just confirms the strategy is alive
+        # Acceptance check. Both profit AND sharpe required — see docstring
+        # for the trial-#5/#6 false-positive rationale.
         accepted = (
             bt.get("success")
             and trades >= accept_min_trades
-            and (profit > 0 or sharpe > 0)
+            and profit > 0
+            and sharpe > 0
         )
         if accepted:
             log.info(f"  ACCEPTED on turn {turn + 1}")
