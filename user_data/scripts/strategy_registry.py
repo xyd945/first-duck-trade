@@ -98,6 +98,77 @@ def _migrate_archetype_column(conn: sqlite3.Connection):
         log.info("Migrated strategies: added archetype")
 
 
+def _migrate_deployment_lifecycle_columns(conn: sqlite3.Connection):
+    """Deployment lifecycle Phase 1: split research_status from
+    deployment_status. The old `status` column conflated "passed
+    research gates" with "actually trading on OKX". The new columns
+    keep them orthogonal so the registry can be honest about what's
+    really running.
+
+    Existing `status='active'` rows backfill to
+    `research_status='approved', deployment_status='not_deployed'`.
+    They become candidates for the reconciler (Phase 2+) to deploy.
+    The old `status` column is preserved as a compatibility shim
+    through Phase 4 cutover and dropped in a follow-up PR.
+
+    See docs/deployment-lifecycle.md for the full lifecycle spec.
+    """
+    cols = _column_names(conn, "strategies")
+    new_cols = (
+        ("research_status",          "TEXT DEFAULT ''"),
+        ("deployment_status",        "TEXT DEFAULT 'not_deployed'"),
+        ("deployed_at",              "TEXT"),
+        ("last_deployment_error",    "TEXT DEFAULT ''"),
+        ("deployment_blocked_until", "TEXT"),
+    )
+    for name, decl in new_cols:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE strategies ADD COLUMN {name} {decl}")
+            log.info(f"Migrated strategies: added {name}")
+
+    # Backfill research_status from the legacy status column. Only fills
+    # rows where research_status is unset — rerunning the migration is a
+    # no-op.
+    conn.execute("""
+        UPDATE strategies
+        SET research_status = CASE status
+            WHEN 'active'    THEN 'approved'
+            WHEN 'retired'   THEN 'retired'
+            WHEN 'candidate' THEN 'candidate'
+            ELSE 'candidate'
+        END
+        WHERE research_status = '' OR research_status IS NULL
+    """)
+
+    # Indexes for the reconciler's hot path (Phase 2): "find approved
+    # strategies eligible to deploy" and "find currently deployed
+    # strategies to compare against running containers".
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_strategies_research_status "
+        "ON strategies(research_status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_strategies_deployment_status "
+        "ON strategies(deployment_status)"
+    )
+
+
+def _migrate_backtest_data_end_at(conn: sqlite3.Connection):
+    """Deployment lifecycle Phase 1: distinguish "when the backtest
+    was invoked" (existing `created_at`) from "the END of the data
+    the backtest ran on". Without this, an eligibility filter on
+    "recent backtest" can be satisfied by re-running yesterday on
+    candles that end three months ago. The deployment-eligibility
+    filter (Phase 2+) checks both.
+    """
+    cols = _column_names(conn, "backtest_results")
+    if "backtest_data_end_at" not in cols:
+        conn.execute(
+            "ALTER TABLE backtest_results ADD COLUMN backtest_data_end_at TEXT DEFAULT ''"
+        )
+        log.info("Migrated backtest_results: added backtest_data_end_at")
+
+
 def init_db():
     """Create tables if they don't exist, then run migrations."""
     conn = get_db()
@@ -144,6 +215,8 @@ def init_db():
     _migrate_attribution_column(conn)
     _migrate_trades_export_path_column(conn)
     _migrate_archetype_column(conn)
+    _migrate_deployment_lifecycle_columns(conn)
+    _migrate_backtest_data_end_at(conn)
     conn.commit()
     conn.close()
     log.info(f"Registry initialized at {DB_PATH}")
@@ -472,6 +545,93 @@ def get_all_strategies(status: str = None) -> list:
         rows = conn.execute(
             "SELECT * FROM strategies ORDER BY created_at DESC"
         ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Deployment lifecycle queries (Phase 1 — used by the reconciler in Phase 2+)
+# ---------------------------------------------------------------------------
+
+def get_deployment_eligible(
+    *,
+    min_trades: int = 20,
+    max_drawdown_pct: float = 15.0,
+    max_backtest_age_days: int = 30,
+    max_data_age_days: int = 30,
+) -> list:
+    """Strategies that pass every hard filter and are candidates for the
+    greedy correlation-aware selection step.
+
+    Filters (all must hold against the LATEST backtest_results row per
+    strategy):
+
+      research_status = 'approved'
+      deployment_status IN ('not_deployed', 'stopped') and NOT
+          currently inside its deployment_blocked_until cooldown
+      latest backtest:
+          total_trades       >= min_trades
+          profit_total_pct   >  0
+          sharpe             >  0
+          max_drawdown_pct   <  max_drawdown_pct
+          created_at         within max_backtest_age_days
+          backtest_data_end_at within max_data_age_days
+              (recent BACKTEST RUN is not enough — the underlying market
+               data must also be recent; a re-run of a stale candle set
+               doesn't count as a fresh validation)
+
+    Returned in NO particular order. The reconciler sorts and applies
+    greedy correlation skip on top.
+    """
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT s.id, s.name, s.archetype, s.target_regime,
+               COALESCE(br.sharpe, 0)            AS sharpe,
+               COALESCE(br.profit_total_pct, 0)  AS profit_total_pct,
+               COALESCE(br.max_drawdown_pct, 0)  AS max_drawdown_pct,
+               COALESCE(br.total_trades, 0)      AS total_trades,
+               COALESCE(br.trades_export_path, '') AS trades_export_path,
+               br.created_at                      AS backtest_at,
+               COALESCE(br.backtest_data_end_at, '') AS backtest_data_end_at
+        FROM strategies s
+        LEFT JOIN backtest_results br
+          ON br.id = (SELECT MAX(id) FROM backtest_results WHERE strategy_id = s.id)
+        WHERE s.research_status = 'approved'
+          AND s.deployment_status IN ('not_deployed', 'stopped')
+          AND (s.deployment_blocked_until IS NULL
+               OR datetime(s.deployment_blocked_until) <= datetime('now'))
+          AND COALESCE(br.total_trades, 0)     >= ?
+          AND COALESCE(br.profit_total_pct, 0) > 0
+          AND COALESCE(br.sharpe, 0)           > 0
+          AND COALESCE(br.max_drawdown_pct, 0) < ?
+          AND br.created_at >= datetime('now', ?)
+          AND br.backtest_data_end_at != ''
+          AND br.backtest_data_end_at >= datetime('now', ?)
+    """, (
+        min_trades,
+        max_drawdown_pct,
+        f"-{max_backtest_age_days} days",
+        f"-{max_data_age_days} days",
+    )).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_currently_deployed() -> list:
+    """Strategies the registry believes are deployed RIGHT NOW.
+
+    Used by:
+      - reconciler diff against `docker ps --filter label=first_duck.role=deployed-strategy`
+      - replacement evaluation (compare challenger to currently-deployed)
+      - drift alarm (Phase 4)
+    """
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT id, name, archetype, target_regime, deployed_at
+        FROM strategies
+        WHERE deployment_status = 'deployed'
+        ORDER BY deployed_at ASC NULLS LAST
+    """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
