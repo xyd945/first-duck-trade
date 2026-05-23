@@ -169,6 +169,68 @@ def _migrate_backtest_data_end_at(conn: sqlite3.Connection):
         log.info("Migrated backtest_results: added backtest_data_end_at")
 
 
+def _backfill_backtest_data_end_at(conn: sqlite3.Connection):
+    """Populate backtest_data_end_at for rows that pre-date the column.
+
+    Existing strategies promoted before this PR have empty
+    backtest_data_end_at, which fails the deployment-eligibility
+    freshness filter — they look "stale data" even though most were
+    actually backtested against current data days ago.
+
+    Strategy: parse the existing ``timerange`` field (format
+    "YYYYMMDD-YYYYMMDD") and use its end as backtest_data_end_at. When
+    timerange is empty or malformed (rare — only true for very old
+    rows backtested without an explicit --timerange), fall back to
+    ``created_at`` (the time the backtest was invoked is a reasonable
+    proxy when no better signal exists). Idempotent: rows already
+    populated by the regular write path are not touched.
+    """
+    # Only do work if column exists (regular migration ran) AND there
+    # are rows to backfill.
+    cols = _column_names(conn, "backtest_results")
+    if "backtest_data_end_at" not in cols:
+        return  # _migrate_backtest_data_end_at hasn't run yet — should never happen
+
+    rows = conn.execute(
+        "SELECT id, timerange, created_at FROM backtest_results "
+        "WHERE backtest_data_end_at IS NULL OR backtest_data_end_at = ''"
+    ).fetchall()
+    if not rows:
+        return
+
+    n_from_timerange = 0
+    n_from_created = 0
+    for r in rows:
+        row_id = r["id"] if isinstance(r, sqlite3.Row) else r[0]
+        tr = (r["timerange"] if isinstance(r, sqlite3.Row) else r[1]) or ""
+        created = (r["created_at"] if isinstance(r, sqlite3.Row) else r[2]) or ""
+
+        # Try timerange first: "YYYYMMDD-YYYYMMDD" or similar.
+        # Take everything after the LAST hyphen so e.g. "20251101-20260101"
+        # gives "20260101" and we then format as ISO date.
+        end_iso = ""
+        if "-" in tr:
+            end_part = tr.rsplit("-", 1)[1].strip()
+            if len(end_part) == 8 and end_part.isdigit():
+                end_iso = f"{end_part[:4]}-{end_part[4:6]}-{end_part[6:8]} 00:00:00"
+                n_from_timerange += 1
+
+        if not end_iso and created:
+            end_iso = created  # fallback
+            n_from_created += 1
+
+        if end_iso:
+            conn.execute(
+                "UPDATE backtest_results SET backtest_data_end_at = ? WHERE id = ?",
+                (end_iso, row_id),
+            )
+
+    log.info(
+        f"Backfilled backtest_data_end_at for {len(rows)} rows "
+        f"({n_from_timerange} from timerange, {n_from_created} from created_at)"
+    )
+
+
 def init_db():
     """Create tables if they don't exist, then run migrations."""
     conn = get_db()
@@ -217,6 +279,7 @@ def init_db():
     _migrate_archetype_column(conn)
     _migrate_deployment_lifecycle_columns(conn)
     _migrate_backtest_data_end_at(conn)
+    _backfill_backtest_data_end_at(conn)
     conn.commit()
     conn.close()
     log.info(f"Registry initialized at {DB_PATH}")
@@ -316,8 +379,8 @@ def record_backtest(strategy_id: int, results: dict, attribution: dict | None = 
         """INSERT INTO backtest_results (strategy_id, timerange, sharpe, sortino,
            max_drawdown_pct, max_drawdown_abs, profit_total_pct, profit_total_abs,
            profit_factor, total_trades, win_rate, backtest_days, avg_duration,
-           attribution_json, trades_export_path, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           attribution_json, trades_export_path, backtest_data_end_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             strategy_id,
             results.get("timerange", ""),
@@ -334,6 +397,12 @@ def record_backtest(strategy_id: int, results: dict, attribution: dict | None = 
             results.get("avg_duration", ""),
             attribution_json,
             results.get("trades_export_path", ""),
+            # backtest_data_end_at: when the BACKTEST RAN AGAINST WHAT data.
+            # Required for deployment-eligibility freshness check — see
+            # docs/deployment-lifecycle.md. Empty string if parser couldn't
+            # extract it (legacy backtests pre-this-PR); the backfill
+            # migration covers existing rows.
+            results.get("backtest_data_end_at", ""),
             now,
         ),
     )

@@ -296,6 +296,13 @@ def parse_backtest_artifact(
         "avg_duration": s.get("holding_avg", ""),
         "backtest_days": int(s.get("backtest_days", 0)),
         "starting_balance": float(s.get("starting_balance", 0.0)),
+        # End of the data this backtest ran on. Distinct from when the
+        # backtest was invoked (created_at on the registry row) — see
+        # docs/deployment-lifecycle.md for why this matters: a "fresh
+        # backtest" run yesterday on stale candles is not the same as
+        # one run against current data. The deployment-eligibility
+        # filter checks both.
+        "backtest_data_end_at": s.get("backtest_end", ""),
     }
 
 
@@ -392,6 +399,11 @@ def parse_backtest_output(output: str, strategy_name: str, timerange: str = None
             start = datetime.strptime(period_match.group(1), "%Y-%m-%d %H:%M:%S")
             end = datetime.strptime(period_match.group(2), "%Y-%m-%d %H:%M:%S")
             result["backtest_days"] = (end - start).days
+            # Capture the end timestamp so eligibility can distinguish
+            # "ran a backtest yesterday" from "ran a backtest on stale
+            # candles". JSON-artifact path emits the same field name
+            # populated from the typed source — see parse_backtest_artifact.
+            result["backtest_data_end_at"] = period_match.group(2)
         except ValueError:
             result["backtest_days"] = 0
     else:
