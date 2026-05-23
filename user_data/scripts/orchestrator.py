@@ -753,20 +753,37 @@ def job_backtest_candidates():
                 sharpe = result.get("sharpe", 0)
                 log.info(f"  {name}: {total_trades} trades, {profit_pct}% profit, Sharpe={sharpe}")
 
-                # R7 gates
+                # R7 gates. Every expected gate produces a verdict in
+                # gate_verdicts even when the data it needs is missing —
+                # under strict_mode (default true via STRICT_PROMOTION_GATES
+                # env var), a skipped verdict counts as FAIL because we don't
+                # want a promotion to ride on "no evidence" rather than
+                # "evidence of pass". Operators can flip the env var to false
+                # to restore the legacy lenient aggregation during research.
+                from pipeline_gates import _skip, _fail, is_strict_pass
+                strict_mode = os.environ.get(
+                    "STRICT_PROMOTION_GATES", "true"
+                ).lower() not in ("0", "false", "no")
                 gate_verdicts = []
+
                 if regime_fractions is not None:
                     v = gate_regime_conditional_floor(
                         result, target_regime, regime_fractions, base_min_trades=20,
                     )
-                    gate_verdicts.append(v)
-                    log.info(f"  {name} [regime]: {v['verdict']} — {v['reason']}")
+                else:
+                    v = _skip("SKIP_REGIME", "regime_fractions not available — "
+                              "btc data file missing or regime detector failed")
+                gate_verdicts.append(v)
+                log.info(f"  {name} [regime]: {v['verdict']} — {v['reason']}")
 
                 if btc_path:
                     bh = compute_btc_buyhold(btc_path, timerange=result.get("timerange"))
                     v = gate_beat_buyhold(result, bh)
-                    gate_verdicts.append(v)
-                    log.info(f"  {name} [buyhold]: {v['verdict']} — {v['reason']}")
+                else:
+                    v = _skip("SKIP_BH", "btc_path not available — "
+                              "buyhold reference cannot be computed")
+                gate_verdicts.append(v)
+                log.info(f"  {name} [buyhold]: {v['verdict']} — {v['reason']}")
 
                 if enable_wf:
                     log.info(f"  {name} [walk-forward]: running {wf_splits} windows × {wf_days}d…")
@@ -779,15 +796,19 @@ def job_backtest_candidates():
                         n_splits=wf_splits, days_per_split=wf_days,
                     )
                     v = gate_walk_forward(wf_results)
-                    gate_verdicts.append(v)
-                    log.info(f"  {name} [walk-forward]: {v['verdict']} — {v['reason']}")
+                else:
+                    v = _skip("SKIP_WF", "walk-forward disabled "
+                              "(set R7_WALK_FORWARD=true to enable)")
+                gate_verdicts.append(v)
+                log.info(f"  {name} [walk-forward]: {v['verdict']} — {v['reason']}")
 
-                # Promotion = baseline profitability AND every gate passes.
-                # We still keep the legacy baseline because gates can skip
-                # (when reference data is missing) and we don't want a
-                # universally-skipping chain to auto-promote losers.
+                # Promotion = baseline profitability AND every gate passes
+                # (strictly, in strict_mode).
                 baseline_ok = total_trades >= 20 and profit_pct > 0 and sharpe > 0
-                all_gates_passed = all(v["passed"] for v in gate_verdicts)
+                if strict_mode:
+                    all_gates_passed = all(is_strict_pass(v) for v in gate_verdicts)
+                else:
+                    all_gates_passed = all(v["passed"] for v in gate_verdicts)
 
                 # R7.4: correlation gate is expensive (reads zip files per
                 # active strategy) — only run it when the candidate is
@@ -797,11 +818,20 @@ def job_backtest_candidates():
                         cand_trades = load_trades_from_zip(trades_path, name)
                         active_peers = get_active_strategies_with_trade_paths()
                         v = gate_correlation(cand_trades, active_peers)
-                        gate_verdicts.append(v)
-                        log.info(f"  {name} [correlation]: {v['verdict']} — {v['reason']}")
-                        all_gates_passed = v["passed"]
                     except Exception as e:
                         log.warning(f"  {name}: correlation gate errored — {e}")
+                        # Previously silently logged and continued; that turned
+                        # an exception into an implicit pass. Now we record an
+                        # explicit fail so the promotion path doesn't ride on
+                        # a swallowed error.
+                        v = _fail("FAIL_CORR_ERROR",
+                                  f"correlation gate raised {type(e).__name__}: {e}")
+                    gate_verdicts.append(v)
+                    log.info(f"  {name} [correlation]: {v['verdict']} — {v['reason']}")
+                    if strict_mode:
+                        all_gates_passed = is_strict_pass(v)
+                    else:
+                        all_gates_passed = v["passed"]
 
                 if baseline_ok and all_gates_passed:
                     promote_strategy(cand["id"])

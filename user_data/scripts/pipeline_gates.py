@@ -49,11 +49,22 @@ def _fail(verdict: str, reason: str, **details) -> dict:
 
 
 def _skip(verdict: str, reason: str, **details) -> dict:
-    """Soft-pass: gate didn't run (missing data, n/a regime, etc.). Treated
-    as PASS by the orchestrator but logged separately so we can spot gates
-    that silently never fire."""
+    """Gate didn't actually evaluate (missing data, n/a regime, degenerate
+    inputs, etc.). The verdict carries ``passed=True`` for legacy compatibility
+    with non-strict aggregation, but ``skipped=True`` lets a strict caller
+    treat it as a fail. In production we want a strategy promoted ONLY when
+    every expected gate produced a real pass — not because the reference
+    data was missing and the gate auto-shrugged."""
     return {"passed": True, "verdict": verdict, "reason": reason,
             "details": details, "skipped": True}
+
+
+def is_strict_pass(verdict: dict) -> bool:
+    """A verdict that should count as PASS even when ``STRICT_PROMOTION_GATES``
+    is on: passed and not skipped. The single source of truth for what
+    "really passed" means — orchestrator + tests both go through this so
+    we can't accidentally diverge."""
+    return verdict.get("passed", False) and not verdict.get("skipped", False)
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +228,19 @@ def gate_beat_buyhold(
     s_dd = float(bt.get("max_drawdown_pct", 0.0))
     bh_profit = float(bh["profit_pct"])
     bh_dd = float(bh["max_drawdown_pct"])
+
+    # Degenerate case: strategy and HODL both at 0% (typically a strategy
+    # that didn't trade vs a holding period that didn't move). Returning
+    # PASS_BH_PROFIT here lets a 0-trade strategy silently clear the gate —
+    # we saw exactly this masking the parser bug pre-PR-35. Make it an
+    # explicit skip so strict mode rejects it.
+    if s_profit == 0.0 and bh_profit == 0.0:
+        return _skip(
+            "PASS_BH_DEGENERATE",
+            "both strategy and HODL profit are 0% — comparison meaningless",
+            strategy_profit=s_profit, buyhold_profit=bh_profit,
+            strategy_dd=s_dd, buyhold_dd=bh_dd,
+        )
 
     # When BH is negative or flat, anything positive trivially wins on profit.
     # Cap the floor at 0 so we don't reward strategies for being "less bad
