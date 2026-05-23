@@ -153,6 +153,39 @@ def _migrate_deployment_lifecycle_columns(conn: sqlite3.Connection):
     )
 
 
+def _migrate_deployment_drift_log_table(conn: sqlite3.Connection):
+    """Deployment lifecycle Phase 2: persists each observation cycle of
+    the reconciler so an operator can review what it WOULD have done
+    over the observe-only week before flipping RECONCILER_ACTING=true.
+
+    One row per reconcile tick. Stored as JSON columns rather than
+    normalized tables because the data is write-once, query-rare,
+    forensics-only — no need for relational queries against it.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS deployment_drift_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            observed_at TEXT NOT NULL,
+            -- 0/1; whether the reconciler is acting on this tick (Phase 2 = 0)
+            reconciler_acting INTEGER NOT NULL,
+            -- JSON: [{id, name, sharpe, ...}, ...] in selection order
+            desired_json TEXT NOT NULL,
+            -- JSON: [{name, status, strategy_id, ...}, ...]
+            running_json TEXT NOT NULL,
+            -- JSON: [{id, name, reason}] — would-start actions
+            intended_starts_json TEXT NOT NULL,
+            -- JSON: [{name, reason}] — would-stop actions
+            intended_stops_json TEXT NOT NULL,
+            -- JSON: [{row, reason}] from selection.skipped
+            skipped_eligible_json TEXT NOT NULL,
+            -- Free-form notes (errors, anomalies) the operator should see
+            notes TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_drift_observed_at
+            ON deployment_drift_log(observed_at DESC);
+    """)
+
+
 def _migrate_backtest_data_end_at(conn: sqlite3.Connection):
     """Deployment lifecycle Phase 1: distinguish "when the backtest
     was invoked" (existing `created_at`) from "the END of the data
@@ -280,6 +313,7 @@ def init_db():
     _migrate_deployment_lifecycle_columns(conn)
     _migrate_backtest_data_end_at(conn)
     _backfill_backtest_data_end_at(conn)
+    _migrate_deployment_drift_log_table(conn)
     conn.commit()
     conn.close()
     log.info(f"Registry initialized at {DB_PATH}")
@@ -684,6 +718,76 @@ def get_deployment_eligible(
     )).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def record_drift_log(
+    *,
+    desired: list,
+    running: list,
+    intended_starts: list,
+    intended_stops: list,
+    skipped_eligible: list,
+    reconciler_acting: bool,
+    notes: str = "",
+) -> int:
+    """Persist a single reconciliation observation. Returns the row id.
+
+    Used by the Phase 2 reconciler to leave a forensic trail. Each call
+    is one tick of ``job_reconcile_deployments`` — operators read the
+    last week of these to decide whether to flip RECONCILER_ACTING=true.
+    """
+    import json as _json
+    conn = get_db()
+    cur = conn.execute("""
+        INSERT INTO deployment_drift_log (
+            observed_at, reconciler_acting,
+            desired_json, running_json,
+            intended_starts_json, intended_stops_json,
+            skipped_eligible_json, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        datetime.now(timezone.utc).isoformat(),
+        1 if reconciler_acting else 0,
+        _json.dumps(desired, default=str),
+        _json.dumps(running, default=str),
+        _json.dumps(intended_starts, default=str),
+        _json.dumps(intended_stops, default=str),
+        _json.dumps(skipped_eligible, default=str),
+        notes,
+    ))
+    conn.commit()
+    drift_id = cur.lastrowid
+    conn.close()
+    return drift_id
+
+
+def get_recent_drift_logs(limit: int = 50) -> list:
+    """Most recent reconciliation observations, newest first. Operator
+    review entrypoint during the Phase 2 observe-only week."""
+    import json as _json
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT id, observed_at, reconciler_acting,
+               desired_json, running_json,
+               intended_starts_json, intended_stops_json,
+               skipped_eligible_json, notes
+        FROM deployment_drift_log
+        ORDER BY observed_at DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        # Inflate JSON columns so callers don't all have to repeat the same dance
+        for k in ("desired_json", "running_json", "intended_starts_json",
+                  "intended_stops_json", "skipped_eligible_json"):
+            try:
+                d[k.removesuffix("_json")] = _json.loads(d[k])
+            except Exception:
+                d[k.removesuffix("_json")] = []
+        out.append(d)
+    return out
 
 
 def get_currently_deployed() -> list:

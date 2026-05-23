@@ -466,6 +466,126 @@ def job_health_check():
             notify_instance_down(name)
 
 
+def job_reconcile_deployments():
+    """Phase 2 of the deployment-lifecycle work — see
+    ``docs/deployment-lifecycle.md``.
+
+    OBSERVE-ONLY in this PR. Computes:
+
+      desired  =  greedy correlation-aware selection from get_deployment_eligible()
+      running  =  containers carrying first_duck.role=deployed-strategy
+
+    and logs the diff (starts + stops the reconciler WOULD perform) plus
+    persists the full snapshot to deployment_drift_log for forensics.
+
+    All Docker SDK calls are unconditionally dry_run=True regardless of
+    the RECONCILER_ACTING env var — Phase 3 is what flips the actual
+    action gate. The env var IS read here so the operator can verify
+    end-to-end that it's wired through before Phase 3 ships.
+
+    Safe to run on every cron tick (every 5 min). No side effects beyond
+    log lines + one drift_log row.
+    """
+    log.info("=== Job: Reconcile deployments (observe-only) ===")
+    reconciler_acting = os.environ.get(
+        "RECONCILER_ACTING", "false"
+    ).lower() in ("1", "true", "yes")
+    if reconciler_acting:
+        log.warning("RECONCILER_ACTING=true is set but Phase 2 still operates "
+                    "dry-run only; actual container management lands in Phase 3.")
+
+    try:
+        from strategy_registry import (
+            get_deployment_eligible, get_currently_deployed, record_drift_log,
+        )
+        from deployment_selection import (
+            compute_desired_deployments, DEFAULT_MAX_DEPLOY, DEFAULT_CORR_THRESHOLD,
+        )
+        from deployment_manager import DeploymentManager, container_name_for
+
+        max_deploy = int(os.environ.get("MAX_DEPLOYED", str(DEFAULT_MAX_DEPLOY)))
+        corr_threshold = float(os.environ.get(
+            "DEPLOYMENT_CORR_THRESHOLD", str(DEFAULT_CORR_THRESHOLD)))
+
+        eligible = get_deployment_eligible()
+        log.info(f"  eligible pool: {len(eligible)} strategies")
+
+        selection = compute_desired_deployments(
+            eligible, max_deploy=max_deploy, corr_threshold=corr_threshold,
+        )
+        desired_rows = selection["desired"]
+        skipped_rows = selection["skipped"]
+
+        # `running` is the GROUND TRUTH from docker — what's actually there.
+        # `registry_deployed` is what the registry BELIEVES is deployed.
+        # The Phase 4 drift alarm compares the two; here we just log both.
+        try:
+            mgr = DeploymentManager()
+            running = mgr.list_deployed()
+        except Exception as e:
+            log.warning(f"  Docker SDK list_deployed failed: {type(e).__name__}: {e}")
+            running = []
+        registry_deployed = get_currently_deployed()
+
+        log.info(f"  desired: {[r.get('name') for r in desired_rows]}")
+        log.info(f"  running (docker): "
+                 f"{[(r['name'], r['status']) for r in running]}")
+        log.info(f"  registry says deployed: "
+                 f"{[r['name'] for r in registry_deployed]}")
+        for s in skipped_rows:
+            row = s["row"]
+            log.info(f"  [skipped] {row.get('name')!r}: {s['reason']}")
+
+        # Compute intent. Container-name match is the canonical join key —
+        # the registry's row.id may differ from what Docker remembers, but
+        # the name derives from the strategy class name and is stable.
+        running_names = {r["name"] for r in running}
+        desired_container_names = {
+            container_name_for(r["name"]): r for r in desired_rows
+        }
+        intended_starts = [
+            {"strategy_id": r.get("id"), "name": r.get("name"),
+             "container_name": cname, "sharpe": r.get("sharpe")}
+            for cname, r in desired_container_names.items()
+            if cname not in running_names
+        ]
+        intended_stops = [
+            {"container_name": rn,
+             "strategy_name": next(
+                 (r["strategy_name"] for r in running if r["name"] == rn), ""),
+             "strategy_id": next(
+                 (r["strategy_id"] for r in running if r["name"] == rn), -1)}
+            for rn in running_names if rn not in desired_container_names
+        ]
+
+        if intended_starts:
+            log.info(f"  WOULD START ({len(intended_starts)}): "
+                     f"{[a['container_name'] for a in intended_starts]}")
+        if intended_stops:
+            log.info(f"  WOULD STOP  ({len(intended_stops)}): "
+                     f"{[a['container_name'] for a in intended_stops]}")
+        if not intended_starts and not intended_stops:
+            log.info("  reconciler converged: desired == running")
+
+        record_drift_log(
+            desired=[{k: v for k, v in r.items()} for r in desired_rows],
+            running=running,
+            intended_starts=intended_starts,
+            intended_stops=intended_stops,
+            skipped_eligible=[
+                {"name": s["row"].get("name"),
+                 "id": s["row"].get("id"),
+                 "reason": s["reason"]}
+                for s in skipped_rows
+            ],
+            reconciler_acting=reconciler_acting,
+            notes="phase-2 observe-only",
+        )
+
+    except Exception as e:
+        log.error(f"reconcile job error: {type(e).__name__}: {e}", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Weekly Jobs: Strategy Factory Loop
 # ---------------------------------------------------------------------------
@@ -1204,6 +1324,14 @@ def main():
 
     # --- Health check (every 2 minutes) ---
     scheduler.add_job(job_health_check, "interval", minutes=2, id="health_check")
+
+    # --- Deployment reconciler (every 5 minutes, observe-only in Phase 2) ---
+    # Logs desired vs running diff and records each tick to
+    # deployment_drift_log. RECONCILER_ACTING is plumbed through but the
+    # job ignores it until Phase 3 — flipping the flag today has no
+    # effect on live containers. See docs/deployment-lifecycle.md.
+    scheduler.add_job(job_reconcile_deployments, "interval", minutes=5,
+                      id="reconcile_deployments")
 
     # --- Wait for instances to be ready ---
     log.info("Waiting 15s for Freqtrade instances to start...")
