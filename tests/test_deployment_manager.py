@@ -100,17 +100,40 @@ def test_spec_command_renders_to_tmp_not_user_data():
     on host disk again."""
     s = _spec()
     cmd = s.freqtrade_command()
-    full = " ".join(cmd)
-    assert "/tmp/config-deployed-funding-contrarian-breakout-v3.json" in full
-    assert "user_data/configs/config-deployed-" not in full or "/tmp/" in full
+    # freqtrade_command now returns a single shell-script string in a list
+    assert len(cmd) == 1
+    script = cmd[0]
+    assert "/tmp/config-deployed-funding-contrarian-breakout-v3.json" in script
+    assert "user_data/configs/config-deployed-" not in script or "/tmp/" in script
 
 
 def test_spec_command_includes_strategy_specific_db_and_log():
     s = _spec()
-    cmd = " ".join(s.freqtrade_command())
-    assert "tradesv3-deployed-funding-contrarian-breakout-v3.sqlite" in cmd
-    assert "ft-deployed-funding-contrarian-breakout-v3.log" in cmd
-    assert "--strategy FundingContrarianBreakout_v3" in cmd
+    script = s.freqtrade_command()[0]
+    assert "tradesv3-deployed-funding-contrarian-breakout-v3.sqlite" in script
+    assert "ft-deployed-funding-contrarian-breakout-v3.log" in script
+    assert "--strategy FundingContrarianBreakout_v3" in script
+
+
+def test_spec_entrypoint_is_sh_dash_c():
+    """The freqtrade image's default entrypoint is `freqtrade`. We must
+    override to /bin/sh -c so our render-then-exec script runs first."""
+    s = _spec()
+    assert s.container_entrypoint == ["/bin/sh", "-c"]
+
+
+def test_spec_command_passes_strategy_path_to_candidates():
+    """Regression: generated strategies live under user_data/strategies/
+    candidates/, not the default user_data/strategies/. Without
+    --strategy-path freqtrade can't import the class and dies at
+    startup with "This class does not exist or contains Python code
+    errors". Caught in the Phase 3 shakedown."""
+    s = _spec()
+    script = s.freqtrade_command()[0]
+    assert "--strategy-path /freqtrade/user_data/strategies/candidates" in script
+    # And --strategy must still be present (the class name lookup happens
+    # against the path)
+    assert "--strategy FundingContrarianBreakout_v3" in script
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +192,28 @@ def test_start_real_mode_calls_containers_run_with_labels():
     assert kwargs["labels"][STRATEGY_ID_LABEL] == "42"
     assert kwargs["network"] == "first-duck-trade_default"
     assert kwargs["restart_policy"] == {"Name": "unless-stopped"}
+
+
+def test_start_overrides_entrypoint_so_shell_script_runs_not_freqtrade():
+    """Regression: the freqtrade docker image's default entrypoint is
+    `freqtrade`. If we don't override it, our command (a shell script
+    via /bin/sh -c) is interpreted as a freqtrade subcommand and the
+    container crashes immediately with "freqtrade: error: argument
+    command: invalid choice: '/bin/sh'". The fix is to pass
+    entrypoint=["/bin/sh", "-c"] alongside the command. Caught in
+    the Phase 3 shakedown when ft-deployed-* containers refused to
+    start."""
+    client = _mock_client()
+    mgr = DeploymentManager(docker_client=client)
+    mgr.start(_spec(), dry_run=False)
+
+    kwargs = client.containers.run.call_args.kwargs
+    assert kwargs["entrypoint"] == ["/bin/sh", "-c"]
+    # The command must be the shell SCRIPT, not pre-prefixed with the shell args
+    assert isinstance(kwargs["command"], list)
+    assert len(kwargs["command"]) == 1
+    assert kwargs["command"][0].startswith("set -e")
+    assert "exec freqtrade trade" in kwargs["command"][0]
 
 
 # ---------------------------------------------------------------------------

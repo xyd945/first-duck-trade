@@ -158,29 +158,46 @@ class DeployedContainerSpec:
             DEPLOYMENT_GENERATION_LABEL: str(self.deployment_generation),
         }
 
+    # Entrypoint MUST be overridden — the freqtrade docker image's default
+    # entrypoint is `freqtrade`, which would then interpret our shell
+    # script as a freqtrade subcommand (and fail with "invalid choice").
+    # Shipping entrypoint=/bin/sh -c lets us run the render step then
+    # exec freqtrade with the right args.
+    @property
+    def container_entrypoint(self) -> list[str]:
+        return ["/bin/sh", "-c"]
+
     def freqtrade_command(self) -> list[str]:
-        """The shell -c command the container runs at startup. Renders
-        the template to /tmp (NOT host-mounted — see PR #38) then
-        execs freqtrade. The per-strategy db and log files DO go to
-        the bind-mounted user_data so they persist across container
-        restarts and are inspectable from host."""
+        """The shell script the container runs at startup. Renders the
+        template to /tmp (NOT host-mounted — see PR #38) then execs
+        freqtrade. Per-strategy db and log files DO go to bind-mounted
+        user_data so they persist across container restarts and are
+        inspectable from the host.
+
+        Returns a single-element list — Docker SDK ``containers.run``
+        with our ``container_entrypoint`` set to ``["/bin/sh", "-c"]``
+        expects exactly one shell-string argument as the command.
+        """
         slug = self.slug
         # The render script's placeholder for the strategy slug is
-        # ${STRATEGY_SLUG}; the container_env adds it.
-        return [
-            "/bin/sh", "-c",
-            (
-                "set -e\n"
-                "python " + RENDER_SCRIPT_IN_CONTAINER + " "
-                + TEMPLATE_PATH_IN_CONTAINER + " "
-                f"/tmp/config-deployed-{slug}.json\n"
-                "exec freqtrade trade "
-                f"--logfile /freqtrade/user_data/logs/ft-deployed-{slug}.log "
-                f"--db-url sqlite:////freqtrade/user_data/tradesv3-deployed-{slug}.sqlite "
-                f"--config /tmp/config-deployed-{slug}.json "
-                f"--strategy {self.strategy_name}"
-            ),
-        ]
+        # ${STRATEGY_SLUG}; the container env (see DeployedContainerSpec.env
+        # built in orchestrator._build_deployed_env) supplies it.
+        script = (
+            "set -e\n"
+            f"python {RENDER_SCRIPT_IN_CONTAINER} "
+            f"{TEMPLATE_PATH_IN_CONTAINER} "
+            f"/tmp/config-deployed-{slug}.json\n"
+            "exec freqtrade trade "
+            f"--logfile /freqtrade/user_data/logs/ft-deployed-{slug}.log "
+            f"--db-url sqlite:////freqtrade/user_data/tradesv3-deployed-{slug}.sqlite "
+            f"--config /tmp/config-deployed-{slug}.json "
+            # Generated strategies live under candidates/, not the default
+            # user_data/strategies/. Without this freqtrade can't import the
+            # class and dies at startup with "This class does not exist".
+            "--strategy-path /freqtrade/user_data/strategies/candidates "
+            f"--strategy {self.strategy_name}"
+        )
+        return [script]
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +315,7 @@ class DeploymentManager:
             volumes=spec.volumes,
             network=spec.network,
             restart_policy=spec.restart_policy,
+            entrypoint=spec.container_entrypoint,
             command=spec.freqtrade_command(),
         )
         log.info(f"started container {spec.container_name} (gen={spec.deployment_generation})")

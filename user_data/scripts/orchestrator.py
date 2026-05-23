@@ -488,8 +488,16 @@ def _build_deployed_env(strategy_name: str, strategy_slug: str) -> dict[str, str
     render_config.py substitutes ${VAR} placeholders in the deployed
     template from these. Any required var that's empty/unset will fail
     the render fast and loud — see render_config.py for the strict check.
+
+    PYTHONPATH=/freqtrade/user_data is non-negotiable: generated
+    strategies do `from indicators.external_data import ...` and that
+    package lives under the bind-mounted user_data/. Without this env
+    var freqtrade dies at strategy-import time with "No module named
+    'indicators'" (same setup as ft-momentum / ft-sweep in
+    docker-compose). Caught in the Phase 3 shakedown.
     """
     return {
+        "PYTHONPATH":               "/freqtrade/user_data",
         "OKX_API_KEY":              os.environ.get("OKX_API_KEY", ""),
         "OKX_API_SECRET":           os.environ.get("OKX_API_SECRET", ""),
         "OKX_API_PASSPHRASE":       os.environ.get("OKX_API_PASSPHRASE", ""),
