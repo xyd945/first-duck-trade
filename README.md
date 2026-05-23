@@ -45,6 +45,16 @@ docker compose logs --tail 30 orchestrator | grep "Jobs registered"
 
 After this, the orchestrator runs autonomously. Nothing for you to do until the first weekly cycle fires on Sunday 02:00 UTC.
 
+### Running tests
+
+The orchestrator container mounts `./tests` read-only so the suite can run from inside without copying files in:
+
+```bash
+docker exec ft-orchestrator python -m pytest tests/ -q
+```
+
+The host doesn't need pytest installed; the container ships with it.
+
 ## Architecture
 
 ```
