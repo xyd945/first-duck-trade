@@ -720,6 +720,71 @@ def get_deployment_eligible(
     return [dict(r) for r in rows]
 
 
+def mark_deployment_status(
+    strategy_id: int,
+    new_status: str,
+    *,
+    error: str = "",
+    block_for_hours: float | None = None,
+) -> None:
+    """Update the deployment_status of a single strategy + side fields.
+
+    Used by the Phase 3+ reconciler to record state transitions:
+
+      deploying   — reconciler is about to start the container
+      deployed    — container start succeeded (writes deployed_at = now)
+      stopping    — reconciler is about to stop the container
+      stopped     — container stopped cleanly
+      failed      — start failed; writes last_deployment_error
+      not_deployed — terminal returns-to-pool state
+
+    ``block_for_hours``: if set, also writes deployment_blocked_until =
+    now + N hours. Use when a strategy hit a risk stop and shouldn't
+    redeploy immediately (the eligibility filter respects this).
+
+    Args:
+      strategy_id: registry id
+      new_status: one of the values listed above
+      error: free-form error message; persisted in last_deployment_error
+      block_for_hours: optional cooldown
+    """
+    from datetime import timedelta
+    valid = ("not_deployed", "deploying", "deployed",
+             "stopping", "stopped", "failed")
+    if new_status not in valid:
+        raise ValueError(
+            f"new_status {new_status!r} must be one of {valid}"
+        )
+
+    now = datetime.now(timezone.utc)
+    conn = get_db()
+
+    fields = ["deployment_status = ?", "last_deployment_error = ?"]
+    params: list = [new_status, error]
+
+    if new_status == "deployed":
+        fields.append("deployed_at = ?")
+        params.append(now.isoformat())
+
+    if block_for_hours is not None:
+        block_until = now + timedelta(hours=block_for_hours)
+        fields.append("deployment_blocked_until = ?")
+        params.append(block_until.isoformat())
+
+    params.append(strategy_id)
+    conn.execute(
+        f"UPDATE strategies SET {', '.join(fields)} WHERE id = ?",
+        tuple(params),
+    )
+    conn.commit()
+    conn.close()
+    log.info(
+        f"deployment_status: strategy_id={strategy_id} → {new_status}"
+        + (f" (error: {error[:80]})" if error else "")
+        + (f" (blocked for {block_for_hours}h)" if block_for_hours else "")
+    )
+
+
 def record_drift_log(
     *,
     desired: list,
