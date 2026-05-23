@@ -134,6 +134,19 @@ services:
       # the per-instance REST APIs.
       - FT_MOMENTUM_API_PASSWORD=${FT_MOMENTUM_API_PASSWORD:-}
       - FT_SWEEP_API_PASSWORD=${FT_SWEEP_API_PASSWORD:-}
+      # Phase 3 deployment reconciler: needed to populate env on
+      # dynamically-spawned ft-deployed-<slug> containers. Same OKX
+      # credentials as the legacy momentum/sweep instances.
+      - OKX_API_KEY=${OKX_API_KEY:-}
+      - OKX_API_SECRET=${OKX_API_SECRET:-}
+      - OKX_API_PASSPHRASE=${OKX_API_PASSPHRASE:-}
+      - FT_DEPLOYED_JWT_SECRET=${FT_DEPLOYED_JWT_SECRET:-}
+      - FT_DEPLOYED_API_PASSWORD=${FT_DEPLOYED_API_PASSWORD:-}
+      # Phase 3 acting gates. Both must be set for the reconciler to
+      # actually start/stop a container; the empty-allowlist default
+      # is the shakedown safety net.
+      - RECONCILER_ACTING=${RECONCILER_ACTING:-false}
+      - RECONCILER_ALLOWLIST=${RECONCILER_ALLOWLIST:-}
     depends_on:
       - freqtrade-sweep
       - freqtrade-momentum

@@ -466,42 +466,92 @@ def job_health_check():
             notify_instance_down(name)
 
 
-def job_reconcile_deployments():
-    """Phase 2 of the deployment-lifecycle work — see
-    ``docs/deployment-lifecycle.md``.
+def _parse_allowlist(raw: str) -> set[int]:
+    """Parse RECONCILER_ALLOWLIST = "127,131" → {127, 131}. Empty / malformed
+    entries silently drop so a typo can't accidentally enable action on the
+    wrong strategy."""
+    out: set[int] = set()
+    for token in (raw or "").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            out.add(int(token))
+        except ValueError:
+            log.warning(f"  RECONCILER_ALLOWLIST: ignoring non-integer token {token!r}")
+    return out
 
-    OBSERVE-ONLY in this PR. Computes:
+
+def _build_deployed_env(strategy_name: str, strategy_slug: str) -> dict[str, str]:
+    """Env vars the deployed-strategy container needs at startup.
+
+    render_config.py substitutes ${VAR} placeholders in the deployed
+    template from these. Any required var that's empty/unset will fail
+    the render fast and loud — see render_config.py for the strict check.
+    """
+    return {
+        "OKX_API_KEY":              os.environ.get("OKX_API_KEY", ""),
+        "OKX_API_SECRET":           os.environ.get("OKX_API_SECRET", ""),
+        "OKX_API_PASSPHRASE":       os.environ.get("OKX_API_PASSPHRASE", ""),
+        "FT_DEPLOYED_JWT_SECRET":   os.environ.get("FT_DEPLOYED_JWT_SECRET", ""),
+        "FT_DEPLOYED_API_PASSWORD": os.environ.get("FT_DEPLOYED_API_PASSWORD", ""),
+        "STRATEGY_NAME":            strategy_name,
+        "STRATEGY_SLUG":            strategy_slug,
+    }
+
+
+def job_reconcile_deployments():
+    """Deployment reconciler — see ``docs/deployment-lifecycle.md``.
+
+    Computes:
 
       desired  =  greedy correlation-aware selection from get_deployment_eligible()
       running  =  containers carrying first_duck.role=deployed-strategy
 
-    and logs the diff (starts + stops the reconciler WOULD perform) plus
-    persists the full snapshot to deployment_drift_log for forensics.
+    and logs the diff (starts + stops) plus persists the full snapshot to
+    deployment_drift_log for forensics.
 
-    All Docker SDK calls are unconditionally dry_run=True regardless of
-    the RECONCILER_ACTING env var — Phase 3 is what flips the actual
-    action gate. The env var IS read here so the operator can verify
-    end-to-end that it's wired through before Phase 3 ships.
+    Acting policy (Phase 3):
 
-    Safe to run on every cron tick (every 5 min). No side effects beyond
-    log lines + one drift_log row.
+      * RECONCILER_ACTING=false (default) → fully observe-only, no Docker
+        mutation. Same behavior as Phase 2.
+      * RECONCILER_ACTING=true AND RECONCILER_ALLOWLIST="<id>,<id>,..."
+        → the reconciler will start/stop containers ONLY for strategies
+        whose id appears in the allowlist. Everything outside the
+        allowlist is still observed and logged but not actually touched.
+      * RECONCILER_ACTING=true AND empty allowlist → still observe-only.
+        The empty allowlist is the deliberate safety net for Phase 3
+        shakedown — operator must explicitly opt one ID in at a time
+        before any container action happens.
+
+    Safe to run on every cron tick (every 5 min).
     """
-    log.info("=== Job: Reconcile deployments (observe-only) ===")
+    log.info("=== Job: Reconcile deployments ===")
     reconciler_acting = os.environ.get(
         "RECONCILER_ACTING", "false"
     ).lower() in ("1", "true", "yes")
-    if reconciler_acting:
-        log.warning("RECONCILER_ACTING=true is set but Phase 2 still operates "
-                    "dry-run only; actual container management lands in Phase 3.")
+    allowlist = _parse_allowlist(os.environ.get("RECONCILER_ALLOWLIST", ""))
+    actually_acting = reconciler_acting and bool(allowlist)
+    if reconciler_acting and not allowlist:
+        log.info("  RECONCILER_ACTING=true but RECONCILER_ALLOWLIST empty — "
+                 "shakedown safety net: behaving as observe-only until an id "
+                 "is explicitly opted in")
+    elif actually_acting:
+        log.info(f"  ACTING for strategy ids in allowlist: {sorted(allowlist)}; "
+                 f"all other intents stay observe-only")
 
     try:
         from strategy_registry import (
             get_deployment_eligible, get_currently_deployed, record_drift_log,
+            mark_deployment_status,
         )
         from deployment_selection import (
             compute_desired_deployments, DEFAULT_MAX_DEPLOY, DEFAULT_CORR_THRESHOLD,
         )
-        from deployment_manager import DeploymentManager, container_name_for
+        from deployment_manager import (
+            DeploymentManager, DeployedContainerSpec, container_name_for,
+            strategy_slug,
+        )
 
         max_deploy = int(os.environ.get("MAX_DEPLOYED", str(DEFAULT_MAX_DEPLOY)))
         corr_threshold = float(os.environ.get(
@@ -567,6 +617,67 @@ def job_reconcile_deployments():
         if not intended_starts and not intended_stops:
             log.info("  reconciler converged: desired == running")
 
+        # Acting path. Only fires when RECONCILER_ACTING=true AND the
+        # strategy id is in RECONCILER_ALLOWLIST. Everything else is
+        # observe-only — Phase 3 shakedown safety: operator opts each
+        # strategy in by ID, one at a time, and watches it for ~24h
+        # before adding more.
+        if actually_acting:
+            host_user_data = os.environ.get("HOST_PROJECT_DIR", "") + "/user_data"
+            for start in intended_starts:
+                sid = start["strategy_id"]
+                if sid not in allowlist:
+                    log.info(f"  [skip-action] start {start['container_name']!r} "
+                             f"(id={sid}) — not in allowlist")
+                    continue
+                mark_deployment_status(sid, "deploying")
+                try:
+                    spec = DeployedContainerSpec(
+                        strategy_id=sid,
+                        strategy_name=start["name"],
+                        deployment_generation=1,  # Phase 5 bumps on redeploy
+                        env=_build_deployed_env(
+                            start["name"], strategy_slug(start["name"])),
+                        volumes={
+                            host_user_data: {
+                                "bind": "/freqtrade/user_data", "mode": "rw"
+                            },
+                        },
+                    )
+                    mgr.start(spec, dry_run=False)
+                    mark_deployment_status(sid, "deployed")
+                    log.info(f"  STARTED {start['container_name']!r} "
+                             f"(strategy_id={sid})")
+                except Exception as e:
+                    err = f"{type(e).__name__}: {e}"
+                    log.error(f"  start FAILED for {start['container_name']!r}: {err}",
+                              exc_info=True)
+                    # cooldown so the next tick doesn't immediately retry
+                    mark_deployment_status(sid, "failed", error=err,
+                                           block_for_hours=1.0)
+
+            for stop in intended_stops:
+                sid = stop.get("strategy_id", -1)
+                if sid not in allowlist:
+                    log.info(f"  [skip-action] stop {stop['container_name']!r} "
+                             f"(id={sid}) — not in allowlist")
+                    continue
+                strat_name = stop["strategy_name"] or stop["container_name"].removeprefix("ft-deployed-")
+                if sid >= 0:
+                    mark_deployment_status(sid, "stopping")
+                try:
+                    mgr.stop_graceful(strat_name, dry_run=False)
+                    mgr.remove(strat_name, dry_run=False)
+                    if sid >= 0:
+                        mark_deployment_status(sid, "stopped")
+                    log.info(f"  STOPPED {stop['container_name']!r}")
+                except Exception as e:
+                    err = f"{type(e).__name__}: {e}"
+                    log.error(f"  stop FAILED for {stop['container_name']!r}: {err}",
+                              exc_info=True)
+                    if sid >= 0:
+                        mark_deployment_status(sid, "failed", error=err)
+
         record_drift_log(
             desired=[{k: v for k, v in r.items()} for r in desired_rows],
             running=running,
@@ -579,7 +690,8 @@ def job_reconcile_deployments():
                 for s in skipped_rows
             ],
             reconciler_acting=reconciler_acting,
-            notes="phase-2 observe-only",
+            notes=("phase-3 acting (allowlist active)" if actually_acting
+                   else "observe-only"),
         )
 
     except Exception as e:
