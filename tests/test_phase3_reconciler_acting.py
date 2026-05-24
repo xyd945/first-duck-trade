@@ -335,3 +335,14 @@ def test_build_deployed_env_returns_empty_string_for_unset_vars(monkeypatch):
     env = _build_deployed_env("X", "x")
     assert env["OKX_API_KEY"] == ""
     assert env["FT_DEPLOYED_API_PASSWORD"] == ""
+
+
+def test_build_deployed_env_sets_pythonpath_to_user_data():
+    """Regression from the Phase 3 shakedown: without PYTHONPATH the
+    deployed container's freqtrade can't import the generated strategy
+    (which does `from indicators.external_data import ...`) and dies
+    with "No module named 'indicators'". ft-momentum / ft-sweep also
+    set this in their docker-compose blocks for the same reason."""
+    from orchestrator import _build_deployed_env
+    env = _build_deployed_env("X", "x")
+    assert env.get("PYTHONPATH") == "/freqtrade/user_data"
