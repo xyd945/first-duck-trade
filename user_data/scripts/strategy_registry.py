@@ -670,8 +670,18 @@ def get_deployment_eligible(
     strategy):
 
       research_status = 'approved'
-      deployment_status IN ('not_deployed', 'stopped') and NOT
-          currently inside its deployment_blocked_until cooldown
+      deployment_status IN ('not_deployed', 'stopped', 'deployed')
+          and NOT inside deployment_blocked_until cooldown.
+          (The 'deployed' inclusion is intentional — selection re-runs
+          every reconciler tick and must SEE currently-deployed winners
+          so they stay in the desired set. The earlier filter that
+          excluded 'deployed' caused per-tick churn: a winner would be
+          picked, deployed, immediately filtered out next tick, picked
+          again from the smaller pool... never running long enough to
+          actually trade. The intent diff in job_reconcile_deployments
+          handles the idempotency — already-running containers don't
+          generate intended_starts, and a still-desired strategy is
+          NOT in intended_stops.)
       latest backtest:
           total_trades       >= min_trades
           profit_total_pct   >  0
@@ -700,7 +710,7 @@ def get_deployment_eligible(
         LEFT JOIN backtest_results br
           ON br.id = (SELECT MAX(id) FROM backtest_results WHERE strategy_id = s.id)
         WHERE s.research_status = 'approved'
-          AND s.deployment_status IN ('not_deployed', 'stopped')
+          AND s.deployment_status IN ('not_deployed', 'stopped', 'deployed')
           AND (s.deployment_blocked_until IS NULL
                OR datetime(s.deployment_blocked_until) <= datetime('now'))
           AND COALESCE(br.total_trades, 0)     >= ?
