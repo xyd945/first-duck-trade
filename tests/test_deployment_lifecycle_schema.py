@@ -210,12 +210,46 @@ def test_eligibility_rejects_unapproved_research_status(isolated_registry):
     assert all(r["name"] != "Candidate" for r in reg.get_deployment_eligible())
 
 
-def test_eligibility_rejects_currently_deployed(isolated_registry):
-    """A strategy already in deployment_status='deployed' must not show
-    up as a candidate to deploy AGAIN."""
+def test_eligibility_includes_currently_deployed_so_winners_stay_picked(isolated_registry):
+    """A currently-deployed strategy MUST appear in the eligible pool —
+    otherwise the per-tick re-selection picks a different top-3, the
+    reconciler sees the previous winner as 'no longer desired', stops
+    its container, and on the very next tick (when the strategy is now
+    'stopped' and so eligible again) picks it back up. Observed live
+    during the Phase 3 shakedown: id 127 churned every 5 minutes for
+    hours, never running long enough to fire any entries.
+
+    The idempotency the reconciler relies on: if a deployed strategy is
+    in desired AND its container is already running, intended_starts is
+    empty for it (no clobber) and intended_stops is empty (still desired).
+    Quiet steady state."""
     reg = isolated_registry
     _seed_strategy_with_backtest(reg, name="Already", deployment_status="deployed")
-    assert all(r["name"] != "Already" for r in reg.get_deployment_eligible())
+    names = [r["name"] for r in reg.get_deployment_eligible()]
+    assert "Already" in names, (
+        f"deployed-status row must remain in eligible pool to prevent churn; "
+        f"got {names}"
+    )
+
+
+def test_deployed_winner_survives_consecutive_eligibility_reads(isolated_registry):
+    """End-to-end shape of the no-churn invariant: a deployed strategy
+    that's the top sharpe in the pool remains the top sharpe after
+    being deployed. The reconciler can call get_deployment_eligible
+    twice in a row + sort by sharpe + take top-N and get the SAME
+    answer both times. That's what prevents the start/stop ping-pong."""
+    reg = isolated_registry
+    _seed_strategy_with_backtest(reg, name="Best",   sharpe=2.5,
+                                 deployment_status="deployed")  # already up
+    _seed_strategy_with_backtest(reg, name="Second", sharpe=1.5)
+    _seed_strategy_with_backtest(reg, name="Third",  sharpe=1.0)
+
+    # Two reads in a row — should be identical (deterministic), with
+    # 'Best' present in both.
+    first  = sorted(r["name"] for r in reg.get_deployment_eligible())
+    second = sorted(r["name"] for r in reg.get_deployment_eligible())
+    assert first == second
+    assert "Best" in first
 
 
 def test_eligibility_respects_deployment_blocked_until_cooldown(isolated_registry):
