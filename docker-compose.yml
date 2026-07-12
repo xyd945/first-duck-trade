@@ -126,6 +126,13 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
       - ORCHESTRATOR_MODE=${ORCHESTRATOR_MODE:-dry-run}
+      # Promotion policy: strict gates require real evidence from every gate.
+      # Keep walk-forward enabled with strict gates, otherwise SKIP_WF blocks
+      # promotion even when a candidate is profitable on the full backtest.
+      - STRICT_PROMOTION_GATES=${STRICT_PROMOTION_GATES:-true}
+      - R7_WALK_FORWARD=${R7_WALK_FORWARD:-1}
+      - R7_WF_SPLITS=${R7_WF_SPLITS:-3}
+      - R7_WF_DAYS=${R7_WF_DAYS:-60}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - HOST_PROJECT_DIR=${PWD}

@@ -924,8 +924,12 @@ def job_backtest_candidates():
             except Exception as e:
                 log.warning(f"  Regime fraction computation failed: {e}")
 
-        # Walk-forward is expensive (N× backtest). Opt-in via env var to keep
-        # the weekly cycle bounded. Default: off.
+        # Walk-forward is expensive (N x backtest), but it is part of the
+        # production promotion story. With STRICT_PROMOTION_GATES=true, a
+        # disabled walk-forward gate records SKIP_WF; strict mode treats that
+        # as "not enough evidence" and blocks promotion. Keep R7_WALK_FORWARD
+        # enabled when strict gates are enabled, or explicitly turn strict mode
+        # off for exploratory runs where skipped gates should be non-blocking.
         enable_wf = os.environ.get("R7_WALK_FORWARD", "").lower() in ("1", "true", "yes")
         wf_splits = int(os.environ.get("R7_WF_SPLITS", "3"))
         wf_days = int(os.environ.get("R7_WF_DAYS", "60"))
@@ -994,12 +998,13 @@ def job_backtest_candidates():
                 log.info(f"  {name}: {total_trades} trades, {profit_pct}% profit, Sharpe={sharpe}")
 
                 # R7 gates. Every expected gate produces a verdict in
-                # gate_verdicts even when the data it needs is missing —
-                # under strict_mode (default true via STRICT_PROMOTION_GATES
-                # env var), a skipped verdict counts as FAIL because we don't
-                # want a promotion to ride on "no evidence" rather than
-                # "evidence of pass". Operators can flip the env var to false
-                # to restore the legacy lenient aggregation during research.
+                # gate_verdicts even when the data it needs is missing.
+                # In strict mode (default), skipped verdicts count as fail:
+                # promotion requires evidence from every gate, not an implicit
+                # pass because a gate was disabled or missing data. This means
+                # STRICT_PROMOTION_GATES=true should normally be paired with
+                # R7_WALK_FORWARD=true, otherwise SKIP_WF blocks otherwise
+                # profitable candidates.
                 from pipeline_gates import _skip, _fail, is_strict_pass
                 strict_mode = os.environ.get(
                     "STRICT_PROMOTION_GATES", "true"
