@@ -386,9 +386,19 @@ def parse_backtest_output(output: str, strategy_name: str, timerange: str = None
         r"Absolute drawdown\s*│\s*([-\d.]+)", output, default=0.0
     )
 
-    # Risk metrics
-    result["sharpe"] = extract_value(r"Sharpe\s*│\s*([-\d.]+)", output, default=0.0)
-    result["sortino"] = extract_value(r"Sortino\s*│\s*([-\d.]+)", output, default=0.0)
+    # Risk metrics. Freqtrade 2026.x labels these rows "Sharpe (closed
+    # trades)" / "Sortino (closed trades)" — the bare "Sharpe │" pattern
+    # stopped matching and silently returned 0.0 for every walk-forward
+    # window (the third silent-zero scraper bug; found during the issue #47
+    # shakedown). Tolerate an optional parenthetical suffix; the first
+    # matching row is the closed-trades metric, same source the JSON
+    # artifact path reports.
+    result["sharpe"] = extract_value(
+        r"Sharpe(?:\s*\([^)]*\))?\s*│\s*([-\d.]+)", output, default=0.0
+    )
+    result["sortino"] = extract_value(
+        r"Sortino(?:\s*\([^)]*\))?\s*│\s*([-\d.]+)", output, default=0.0
+    )
     result["profit_factor"] = extract_value(
         r"Profit factor\s*│\s*([-\d.]+)", output, default=0.0
     )
