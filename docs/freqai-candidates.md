@@ -136,9 +136,10 @@ FreqAI reads the same OKX futures feathers the rule-based backtests use
   ceiling) plus slack. A FreqAI backtest needs training history BEFORE its
   timerange start; if you widen the backtest window or raise the train-period
   bound, resize the fetch depth with it.
-- **Pairs**: the job reads its pair list from `config.json`. Keep
-  `config-freqai-base.json`'s `pair_whitelist` a subset of `config.json`'s, or
-  FreqAI backtests will look for data the refresh never downloads.
+- **Pairs**: the job unions the pair lists of `config.json` and
+  `config-freqai-base.json`, so a pair added only to the FreqAI config still
+  gets downloaded. (The lists are identical today; the union exists so drift
+  is harmless rather than a silent missing-data failure.)
 
 ## Operational cost
 

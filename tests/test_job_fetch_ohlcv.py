@@ -50,6 +50,53 @@ def test_fetch_ohlcv_builds_correct_docker_command(cfg_with_pairs):
     assert "--timeframes" in cmd and cmd[cmd.index("--timeframes") + 1] == "1h"
 
 
+def _write_freqai_config(base_dir: Path, pairs: list):
+    cfg_dir = base_dir / "configs"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "config-freqai-base.json").write_text(
+        json.dumps({"exchange": {"pair_whitelist": pairs}})
+    )
+
+
+def test_fetch_ohlcv_unions_freqai_config_pairs(cfg_with_pairs):
+    """A pair present only in config-freqai-base.json must still be
+    downloaded — otherwise FreqAI backtests reference data the refresh
+    never fetches (issue #47 review follow-up)."""
+    _write_freqai_config(cfg_with_pairs, ["BTC/USDT", "DOGE/USDT"])
+    with patch.object(orchestrator.subprocess, "run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        orchestrator.job_fetch_ohlcv()
+    cmd = mock_run.call_args[0][0]
+    assert "DOGE/USDT" in cmd
+    # No duplicate for the shared pair
+    assert cmd.count("BTC/USDT") == 1
+    # config.json ordering preserved, union appended
+    assert cmd.index("BTC/USDT") < cmd.index("DOGE/USDT")
+
+
+def test_fetch_ohlcv_works_without_freqai_config(cfg_with_pairs):
+    """The freqai base config is optional — its absence must not block
+    the refresh of the main pairs."""
+    with patch.object(orchestrator.subprocess, "run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        orchestrator.job_fetch_ohlcv()
+    cmd = mock_run.call_args[0][0]
+    assert "BTC/USDT" in cmd and "SOL/USDT" in cmd
+
+
+def test_fetch_ohlcv_survives_corrupt_freqai_config(cfg_with_pairs):
+    """A malformed freqai config is logged, never fatal — the main
+    refresh must still run."""
+    cfg_dir = cfg_with_pairs / "configs"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "config-freqai-base.json").write_text("{not json")
+    with patch.object(orchestrator.subprocess, "run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        orchestrator.job_fetch_ohlcv()
+    cmd = mock_run.call_args[0][0]
+    assert "BTC/USDT" in cmd
+
+
 def test_fetch_ohlcv_handles_missing_config(tmp_path, monkeypatch):
     """No config.json → log error, do not raise (don't crash orchestrator)."""
     monkeypatch.setattr(orchestrator, "BASE_DIR", tmp_path)

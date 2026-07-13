@@ -261,9 +261,10 @@ def job_fetch_ohlcv():
     Freqtrade incrementally appends — re-running is idempotent and only
     fetches what's new.
 
-    Pairs/timeframe come from config.json; config-freqai-base.json must
-    keep its pair_whitelist a subset of config.json's, or FreqAI backtests
-    will miss data this job never downloads.
+    Pairs/timeframe come from config.json, UNIONED with the pair_whitelist
+    of config-freqai-base.json so FreqAI backtests can never reference data
+    this job doesn't download — the two lists are identical today, but the
+    union makes drift harmless instead of silently breaking ML candidates.
 
     Runs Saturday 19:30 UTC, 30 min before generation, so the Saturday
     mini-backtests and Sunday full backtests both see fresh data. Without
@@ -280,6 +281,21 @@ def job_fetch_ohlcv():
     except Exception as e:
         log.error(f"OHLCV fetch: could not read pair_whitelist from config: {e}")
         return
+    # Union in the FreqAI base config's pairs (issue #47). Missing file is
+    # fine — the freqai path is optional; any other read error is logged
+    # but never blocks the refresh of the main pairs.
+    try:
+        with open(BASE_DIR / "configs" / "config-freqai-base.json") as fh:
+            freqai_pairs = (json.load(fh).get("exchange", {})
+                            .get("pair_whitelist", []))
+        for p in freqai_pairs:
+            if p not in pairs:
+                pairs.append(p)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning(f"OHLCV fetch: could not union freqai config pairs: {e}")
+
     if not pairs:
         log.warning("OHLCV fetch: no pairs configured, skipping")
         return
