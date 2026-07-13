@@ -108,6 +108,34 @@ services:
       --timeframe 1h
 
   # ==========================================================================
+  # FreqAI Backtest Runner (on-demand, not always running)
+  # Used by the orchestrator to evaluate ML (FreqAI) candidate strategies.
+  # Separate service because FreqAI needs the stable_freqai image (ships
+  # LightGBM et al.) and materially more CPU/memory than a rule-based
+  # backtest — model training runs once per sliding window per pair.
+  # ==========================================================================
+  freqtrade-freqai:
+    image: freqtradeorg/freqtrade:stable_freqai
+    container_name: ft-freqai
+    profiles:
+      - backtest  # Only starts when explicitly requested
+    volumes:
+      - "./user_data:/freqtrade/user_data"
+    environment:
+      - PYTHONPATH=/freqtrade/user_data
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 6G
+    command: >
+      backtesting
+      --config /freqtrade/user_data/configs/config-freqai-base.json
+      --strategy FreqaiBaselineLGBM
+      --freqaimodel LightGBMRegressor
+      --timeframe 1h
+
+  # ==========================================================================
   # Orchestrator: APScheduler-based job manager
   # ==========================================================================
   orchestrator:

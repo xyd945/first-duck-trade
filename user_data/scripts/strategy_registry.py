@@ -98,6 +98,24 @@ def _migrate_archetype_column(conn: sqlite3.Connection):
         log.info("Migrated strategies: added archetype")
 
 
+def _migrate_spec_type_column(conn: sqlite3.Connection):
+    """Issue #47: add spec_type so ML (FreqAI) candidates are first-class.
+
+    'rule'   — rendered from a rule-based strategy_spec (the default; all
+               pre-existing rows are rule-based)
+    'freqai' — rendered from a freqai_spec; needs the stable_freqai image,
+               a per-candidate config, and mandatory walk-forward. Excluded
+               from hyperopt rescue and deployment eligibility (see the
+               queries below for why).
+    """
+    cols = _column_names(conn, "strategies")
+    if "spec_type" not in cols:
+        conn.execute(
+            "ALTER TABLE strategies ADD COLUMN spec_type TEXT DEFAULT 'rule'"
+        )
+        log.info("Migrated strategies: added spec_type")
+
+
 def _migrate_deployment_lifecycle_columns(conn: sqlite3.Connection):
     """Deployment lifecycle Phase 1: split research_status from
     deployment_status. The old `status` column conflated "passed
@@ -310,6 +328,7 @@ def init_db():
     _migrate_attribution_column(conn)
     _migrate_trades_export_path_column(conn)
     _migrate_archetype_column(conn)
+    _migrate_spec_type_column(conn)
     _migrate_deployment_lifecycle_columns(conn)
     _migrate_backtest_data_end_at(conn)
     _backfill_backtest_data_end_at(conn)
@@ -330,12 +349,16 @@ def register_strategy(
     target_regime: str = "all",
     generation_id: str = "",
     archetype: str = "",
+    spec_type: str = "rule",
 ) -> int:
     """Register a new candidate strategy. Returns strategy ID.
 
     `archetype` (Phase 6) is the enum value from archetypes.py — used by
     failure memory and attribution queries to filter/aggregate per-archetype.
     Empty string for legacy strategies registered before Phase 6.
+
+    `spec_type` (issue #47) is 'rule' for rule-based candidates (default)
+    or 'freqai' for ML candidates rendered via freqai_spec.
     """
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
@@ -382,14 +405,17 @@ def register_strategy(
 
     cursor = conn.execute(
         """INSERT INTO strategies (name, filepath, thesis, target_regime, generation_id,
-           archetype, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'candidate', ?)""",
-        (name, str(filepath), thesis, target_regime, generation_id, archetype, now),
+           archetype, spec_type, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?)""",
+        (name, str(filepath), thesis, target_regime, generation_id, archetype,
+         spec_type, now),
     )
     conn.commit()
     strategy_id = cursor.lastrowid
     conn.close()
     log.info(f"Registered strategy: {name} (id={strategy_id}, "
-             f"regime={target_regime}, archetype={archetype or 'legacy'})")
+             f"regime={target_regime}, archetype={archetype or 'legacy'}, "
+             f"spec_type={spec_type})")
     return strategy_id
 
 
@@ -552,6 +578,11 @@ def get_hyperopt_candidates(limit: int = 3, max_age_days: int = 14) -> list:
     Restricted to retirements within the last `max_age_days` so we don't
     re-process strategies the user already saw and dismissed.
 
+    FreqAI candidates are excluded: their tunable surface is the model +
+    threshold spec, not IntParameter/DecimalParameter spaces, so Freqtrade
+    hyperopt has nothing to search — rescue for ML candidates means a new
+    spec, not a parameter sweep (issue #47).
+
     Sort: highest total_trades first. Strategies with some trades but no edge
     are MUCH easier to rescue than strategies with zero trades; the latter
     are over-constrained at the logic level, not just the threshold level.
@@ -569,6 +600,7 @@ def get_hyperopt_candidates(limit: int = 3, max_age_days: int = 14) -> list:
         WHERE s.status = 'retired'
           AND s.failure_verdict IN ('FAIL_TOO_FEW', 'FAIL_UNPROFITABLE')
           AND s.retired_at >= datetime('now', ?)
+          AND COALESCE(s.spec_type, 'rule') != 'freqai'
         ORDER BY total_trades DESC, s.retired_at DESC
         LIMIT ?
     """, (f"-{max_age_days} days", limit)).fetchall()
@@ -669,6 +701,12 @@ def get_deployment_eligible(
     Filters (all must hold against the LATEST backtest_results row per
     strategy):
 
+      spec_type != 'freqai'
+          Issue #47 Phase 3 (deliberate): the reconciler's ft-deployed-*
+          containers run freqtradeorg/freqtrade:stable, which has no ML
+          deps, and live FreqAI additionally needs retraining/model-
+          freshness ops. Until that lands, a promoted FreqAI strategy is
+          research-validated but not deployable.
       research_status = 'approved'
       deployment_status IN ('not_deployed', 'stopped', 'deployed')
           and NOT inside deployment_blocked_until cooldown.
@@ -710,6 +748,7 @@ def get_deployment_eligible(
         LEFT JOIN backtest_results br
           ON br.id = (SELECT MAX(id) FROM backtest_results WHERE strategy_id = s.id)
         WHERE s.research_status = 'approved'
+          AND COALESCE(s.spec_type, 'rule') != 'freqai'
           AND s.deployment_status IN ('not_deployed', 'stopped', 'deployed')
           AND (s.deployment_blocked_until IS NULL
                OR datetime(s.deployment_blocked_until) <= datetime('now'))

@@ -154,6 +154,18 @@ Between the full backtest and the promote decision, four gates evaluate the resu
 
 Each gate returns a verdict. Retirements are tagged with the first failing gate's code (`FAIL_BH`, `FAIL_REGIME`, `FAIL_CORRELATION`, etc.) so failure memory captures specific reasons.
 
+### FreqAI (ML) candidates
+
+A second candidate type (issue #47): instead of rule-based entry/exit conditions, a
+LightGBM regressor predicts the forward return over a fixed horizon from whitelisted
+features (technicals + the same macro/positioning columns above), and trades on
+thresholded predictions. Same declarative-spec safety model (features, model params,
+and thresholds are validated against whitelists and bounds — rendered candidates
+contain zero executable code), same registry lifecycle, same gates — plus a stricter
+rule: walk-forward is mandatory and a skipped walk-forward blocks promotion
+regardless of `STRICT_PROMOTION_GATES`. FreqAI candidates are excluded from hyperopt
+rescue and (for now) from live deployment. See `docs/freqai-candidates.md`.
+
 ### Reflector + generator feedback loops
 
 - **Reflector** (weekly, Sunday 03:00 UTC): an LLM reads the week's instance performance, regime state, registry stats, and **the per-strategy attribution data**, then writes a markdown reflection naming cross-strategy patterns (e.g. "fgi_fear appeared in top-positive for 4/6 recent ranging strategies").

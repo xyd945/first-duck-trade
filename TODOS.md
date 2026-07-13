@@ -88,6 +88,23 @@ structural enforcement (spec validator requires).
   columns to the dataframe via `add_external_data` or a new indicator helper, plus
   prompt guidance on typical session windows (~3-4 hours of work).
 
+## FreqAI candidate type (issue #47) — Phases 1+2 DONE
+
+- [x] FreqAI backtest service (`freqtrade-freqai`, stable_freqai image)
+- [x] Hand-written baseline (`FreqaiBaselineLGBM`) — trains + backtests in Docker
+- [x] Declarative spec → renderer path (`freqai_spec.py`): feature whitelist,
+      bounded LightGBM params, declarations-only rendered candidates
+- [x] Registry `spec_type` column; freqai excluded from hyperopt rescue + deployment
+- [x] Orchestrator lifecycle integration with MANDATORY walk-forward for freqai
+- [x] Live shakedown: baseline ran the full lifecycle and was correctly retired
+      (`FAIL_UNPROFITABLE`, gates + failure memory + model purge all exercised)
+- [ ] **Phase 3 — LLM-proposed freqai specs**: wire generator/critic to emit
+      `freqai_spec` JSONs (the safe renderer path now exists); start with 1–2
+      specs/week alongside rule candidates
+- [ ] **Phase 3 — live deployment of ML strategies**: reconciler support for the
+      freqai image, model retraining/freshness ops, low-confidence retirement
+      (`stale model`, `low confidence` verdicts)
+
 ## Future enhancements
 
 - [ ] **Adaptive `macro_min_confidence`** — spec renderer auto-tunes the threshold per

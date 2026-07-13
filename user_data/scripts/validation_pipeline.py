@@ -92,18 +92,19 @@ class ValidationResult:
 class SecurityVisitor(ast.NodeVisitor):
     """AST visitor that checks for banned patterns."""
 
-    def __init__(self, result: ValidationResult):
+    def __init__(self, result: ValidationResult, allowed_imports: frozenset = None):
         self.result = result
+        self.allowed_imports = allowed_imports or ALLOWED_IMPORT_PREFIXES
 
     def visit_Import(self, node):
         for alias in node.names:
             module = alias.name.split(".")[0]
             if module in BANNED_IMPORTS:
                 self.result.fail(f"Banned import: '{alias.name}' (line {node.lineno})")
-            elif module not in ALLOWED_IMPORT_PREFIXES:
+            elif module not in self.allowed_imports:
                 self.result.fail(
                     f"Disallowed import: '{alias.name}' (line {node.lineno}). "
-                    f"Only these are allowed: {sorted(ALLOWED_IMPORT_PREFIXES)}"
+                    f"Only these are allowed: {sorted(self.allowed_imports)}"
                 )
         self.generic_visit(node)
 
@@ -112,10 +113,10 @@ class SecurityVisitor(ast.NodeVisitor):
             module = node.module.split(".")[0]
             if module in BANNED_IMPORTS:
                 self.result.fail(f"Banned import: 'from {node.module}' (line {node.lineno})")
-            elif module not in ALLOWED_IMPORT_PREFIXES:
+            elif module not in self.allowed_imports:
                 self.result.fail(
                     f"Disallowed import: 'from {node.module}' (line {node.lineno}). "
-                    f"Only these are allowed: {sorted(ALLOWED_IMPORT_PREFIXES)}"
+                    f"Only these are allowed: {sorted(self.allowed_imports)}"
                 )
         self.generic_visit(node)
 
@@ -238,6 +239,123 @@ def check_structure(tree: ast.Module, result: ValidationResult):
     # Reject short strategies — we trade SPOT only
     if "can_short" in assigns:
         result.fail("can_short is not allowed. We trade SPOT only (long entries only).")
+
+
+# ---------------------------------------------------------------------------
+# FreqAI candidate structure (issue #47)
+# ---------------------------------------------------------------------------
+
+# Rendered FreqAI candidates additionally import their trusted base class.
+FREQAI_ALLOWED_IMPORT_PREFIXES = ALLOWED_IMPORT_PREFIXES | {"base_freqai"}
+
+# Attributes the freqai renderer always emits — absence means someone
+# hand-edited or bypassed the renderer.
+FREQAI_REQUIRED_ATTRS = (
+    "STRATEGY_THESIS", "TARGET_REGIME", "GENERATION_ID",
+    "FREQAI_FEATURES", "ENTRY_THRESHOLD", "EXIT_THRESHOLD",
+)
+
+
+def check_freqai_structure(tree: ast.Module, result: ValidationResult):
+    """Verify a FreqAI candidate is a DECLARATIVE subclass of
+    BaseFreqaiStrategy.
+
+    Stricter than the rule-based structure check: FreqAI candidates carry
+    zero executable logic — all computation lives in the hand-written base
+    class and feature library. ANY method definition in the subclass is a
+    violation (it could override feature engineering, targets, or entry
+    logic with unreviewed code).
+    """
+    classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+    if not classes:
+        result.fail("No class definition found. FreqAI candidate must define a class.")
+        return
+
+    strategy_class = None
+    for cls in classes:
+        for base in cls.bases:
+            base_name = ""
+            if isinstance(base, ast.Name):
+                base_name = base.id
+            elif isinstance(base, ast.Attribute):
+                base_name = base.attr
+            if base_name == "BaseFreqaiStrategy":
+                strategy_class = cls
+                break
+
+    if not strategy_class:
+        result.fail(
+            "FreqAI candidate must extend BaseFreqaiStrategy. "
+            f"Found classes: {[c.name for c in classes]}"
+        )
+        return
+
+    if len(classes) > 1:
+        result.fail(
+            f"FreqAI candidate must define exactly one class, found "
+            f"{[c.name for c in classes]}"
+        )
+
+    methods = [
+        n.name for n in strategy_class.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    if methods:
+        result.fail(
+            f"FreqAI candidates are declarations-only; method definitions "
+            f"are not allowed (found: {methods}). Logic belongs in "
+            f"BaseFreqaiStrategy / indicators.freqai_features."
+        )
+
+    assigns = set()
+    for node in strategy_class.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assigns.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            assigns.add(node.target.id)
+
+    missing = [a for a in FREQAI_REQUIRED_ATTRS if a not in assigns]
+    if missing:
+        result.fail(f"Missing required class attributes: {missing}")
+
+    if "can_short" in assigns:
+        result.fail("can_short is not allowed. We trade SPOT only (long entries only).")
+
+
+def validate_freqai_strategy_file(filepath: str | Path) -> ValidationResult:
+    """Full validation pipeline for a rendered FreqAI candidate .py file.
+
+    Same security + look-ahead stages as validate_strategy_file (the
+    look-ahead check applies UNMODIFIED because rendered candidates hold no
+    computation — the forward-looking target shift lives in the trusted
+    feature library, not in candidate files), plus the stricter
+    declarations-only structure check.
+    """
+    filepath = Path(filepath)
+    result = ValidationResult()
+
+    if not filepath.exists():
+        return result.fail(f"File not found: {filepath}")
+    try:
+        source = filepath.read_text()
+    except Exception as e:
+        return result.fail(f"Cannot read file: {e}")
+    if not source.strip():
+        return result.fail("File is empty")
+
+    try:
+        tree = ast.parse(source, filename=str(filepath))
+    except SyntaxError as e:
+        return result.fail(f"Syntax error: {e}")
+
+    SecurityVisitor(result, allowed_imports=FREQAI_ALLOWED_IMPORT_PREFIXES).visit(tree)
+    LookAheadVisitor(result).visit(tree)
+    check_freqai_structure(tree, result)
+
+    log.info(f"FreqAI validation of {filepath.name}: {result}")
+    return result
 
 
 # ---------------------------------------------------------------------------
