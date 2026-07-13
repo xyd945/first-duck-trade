@@ -979,7 +979,9 @@ def get_recent_attributions(n: int = 10, min_trades: int = 10) -> list:
     return results
 
 
-def get_recent_failures(k: int = 8, regime: str | None = None) -> list:
+def get_recent_failures(
+    k: int = 8, regime: str | None = None, spec_type: str | None = None
+) -> list:
     """Return the most recently retired candidates with a populated failure_verdict.
 
     Used by the generator to build a "don't repeat these" section of the prompt.
@@ -988,6 +990,10 @@ def get_recent_failures(k: int = 8, regime: str | None = None) -> list:
     Each row is enriched with the strategy's latest backtest metrics (when
     available) and a short code excerpt, so the LLM sees *why* the strategy
     failed — not just that it did.
+
+    `spec_type` filters failures to one candidate family ('rule'/'freqai') —
+    a rule-generation prompt can't act on an ML experiment's failure and
+    vice versa, so each generator asks for its own history. None = all.
     """
     conn = get_db()
     params: list = []
@@ -995,6 +1001,10 @@ def get_recent_failures(k: int = 8, regime: str | None = None) -> list:
     if regime and regime != "all":
         regime_clause = "AND (s.target_regime = ? OR s.target_regime = 'all')"
         params.append(regime)
+    spec_type_clause = ""
+    if spec_type:
+        spec_type_clause = "AND COALESCE(s.spec_type, 'rule') = ?"
+        params.append(spec_type)
     params.append(k)
 
     rows = conn.execute(f"""
@@ -1007,6 +1017,7 @@ def get_recent_failures(k: int = 8, regime: str | None = None) -> list:
         WHERE s.status = 'retired'
           AND s.failure_verdict != ''
           {regime_clause}
+          {spec_type_clause}
         ORDER BY s.retired_at DESC
         LIMIT ?
     """, params).fetchall()
@@ -1018,6 +1029,38 @@ def get_recent_failures(k: int = 8, regime: str | None = None) -> list:
         d["code_excerpt"] = _extract_entry_logic(d.get("filepath", ""))
         failures.append(d)
     return failures
+
+
+def get_strategies_overview(spec_type: str | None = None) -> list:
+    """All strategies (any status) joined with their latest backtest row.
+
+    Powers the FreqAI experiment comparison report (issue #47): one row per
+    strategy with status, verdict, and headline metrics. `spec_type` filters
+    to one candidate family; None returns everything.
+    """
+    conn = get_db()
+    params: list = []
+    clause = ""
+    if spec_type:
+        clause = "WHERE COALESCE(s.spec_type, 'rule') = ?"
+        params.append(spec_type)
+    rows = conn.execute(f"""
+        SELECT s.id, s.name, s.status, s.target_regime, s.archetype,
+               COALESCE(s.spec_type, 'rule') AS spec_type,
+               s.filepath, s.failure_verdict, s.failure_reason, s.created_at,
+               COALESCE(br.total_trades, 0)      AS total_trades,
+               COALESCE(br.profit_total_pct, 0)  AS profit_total_pct,
+               COALESCE(br.sharpe, 0)            AS sharpe,
+               COALESCE(br.max_drawdown_pct, 0)  AS max_drawdown_pct,
+               br.created_at                      AS backtest_at
+        FROM strategies s
+        LEFT JOIN backtest_results br
+          ON br.id = (SELECT MAX(id) FROM backtest_results WHERE strategy_id = s.id)
+        {clause}
+        ORDER BY s.created_at DESC
+    """, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def _extract_entry_logic(filepath: str, max_lines: int = 30) -> str:
