@@ -122,9 +122,32 @@ def gate_regime_conditional_floor(
     in breakout regime should pass with ~3 trades, not 20.
 
     Strategies with target_regime='all' don't get any adjustment — they're
-    expected to trade across all regimes.
+    expected to trade across all regimes, so the UNADJUSTED base floor
+    applies as a real pass/fail. This used to be a skip verdict, which
+    strict mode counts as "no evidence" — meaning no 'all'-regime candidate
+    could ever promote under STRICT_PROMOTION_GATES, however profitable.
+    The gate's evidence for 'all' is simply the base floor itself.
+
+    Only a target_regime the fractions can't speak to (unknown label) still
+    skips — there the gate genuinely has no basis to evaluate.
     """
-    if target_regime == "all" or target_regime not in regime_fractions:
+    if target_regime == "all":
+        trades = bt.get("total_trades", 0)
+        if trades >= base_min_trades:
+            return _pass(
+                "PASS_REGIME",
+                f"{trades} trades clears unadjusted floor of {base_min_trades} "
+                f"(target=all — no regime adjustment applicable)",
+                trades=trades, adjusted_floor=base_min_trades, regime_fraction=1.0,
+            )
+        return _fail(
+            "FAIL_REGIME",
+            f"{trades} trades < unadjusted floor of {base_min_trades} "
+            f"(target=all — no regime adjustment applicable)",
+            trades=trades, adjusted_floor=base_min_trades, regime_fraction=1.0,
+        )
+
+    if target_regime not in regime_fractions:
         return _skip("PASS_REGIME_NA", f"target_regime={target_regime} — no adjustment")
 
     frac = regime_fractions.get(target_regime, 0.0)

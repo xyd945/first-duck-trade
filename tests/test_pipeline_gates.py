@@ -28,12 +28,25 @@ from pipeline_gates import (
 # Regime-conditional floor
 # ---------------------------------------------------------------------------
 
-def test_regime_floor_skips_for_target_all():
-    """target_regime='all' shouldn't get any adjustment — it's expected to trade always."""
+def test_regime_floor_applies_base_floor_for_target_all():
+    """target_regime='all' gets no adjustment — the UNADJUSTED base floor
+    applies as a real verdict. (Previously a skip, which strict mode reads
+    as missing evidence: no 'all' candidate could ever promote.)"""
     bt = {"total_trades": 5}
     v = gate_regime_conditional_floor(bt, "all", {"trending": 0.5}, base_min_trades=20)
-    assert v["passed"] is True
-    assert v["verdict"] == "PASS_REGIME_NA"
+    assert v["passed"] is False
+    assert v["verdict"] == "FAIL_REGIME"
+
+
+def test_regime_floor_target_all_real_pass_clears_strict_mode():
+    """An 'all' candidate that clears the base floor gets a REAL pass —
+    the strict-gates promotion path must accept it."""
+    from pipeline_gates import is_strict_pass
+
+    bt = {"total_trades": 25}
+    v = gate_regime_conditional_floor(bt, "all", {"trending": 0.5}, base_min_trades=20)
+    assert v["verdict"] == "PASS_REGIME"
+    assert is_strict_pass(v)
 
 
 def test_regime_floor_lowers_threshold_when_regime_rare():
