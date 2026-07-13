@@ -11,6 +11,10 @@ user_data/config.json
 # block git from descending, so `!*.template` couldn't re-include them.)
 user_data/configs/*.json
 user_data/configs/.*
+# The FreqAI base config is deliberately secrets-free (dry-run, empty
+# exchange keys, no api_server) and is read verbatim — no env rendering —
+# so unlike the instance configs it is committed, not templated (issue #47).
+!user_data/configs/config-freqai-base.json
 
 # Freqtrade download data
 user_data/data/
