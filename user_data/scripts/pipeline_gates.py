@@ -303,13 +303,24 @@ def run_walk_forward(
     n_splits: int = 3,
     days_per_split: int = 60,
     end_date: datetime = None,
+    retry_crashed: int = 1,
+    retry_delay_seconds: float = 5.0,
 ) -> list[dict]:
     """Run the same strategy across N consecutive sub-windows. Returns a list
     of backtest result dicts (one per window). Pure shell — relies on the
     injected backtest_fn so it's trivially testable.
 
     backtest_fn signature: (strategy_name, timerange) -> dict
+
+    A crashed window is retried up to `retry_crashed` times (with a short
+    pause) before it counts: windows launch back-to-back containers, and a
+    transient failure (exchange market load, docker hiccup) would otherwise
+    turn into a permanent FAIL_WF_CRASH — observed once during the issue #47
+    shakedown, where the crash error itself was discarded. A real crash
+    fails the retry too, and now gets its error logged.
     """
+    import time as _time
+
     if end_date is None:
         end_date = datetime.now(timezone.utc)
     ranges = split_timerange(end_date, n_splits * days_per_split, n_splits)
@@ -317,6 +328,22 @@ def run_walk_forward(
     for tr in ranges:
         log.info(f"walk-forward window: {strategy_name} {tr}")
         r = backtest_fn(strategy_name, tr)
+        attempt = 0
+        while not r.get("success") and attempt < retry_crashed:
+            attempt += 1
+            log.warning(
+                f"walk-forward window {tr} crashed "
+                f"({r.get('error', 'unknown')}); retry {attempt}/{retry_crashed}"
+            )
+            if retry_delay_seconds:
+                _time.sleep(retry_delay_seconds)
+            r = backtest_fn(strategy_name, tr)
+        if not r.get("success"):
+            log.warning(
+                f"walk-forward window {tr} failed permanently: "
+                f"{r.get('error', 'unknown')}\n"
+                f"--- last output ---\n{str(r.get('raw_output', ''))[-500:]}"
+            )
         r["_window_timerange"] = tr
         results.append(r)
     return results

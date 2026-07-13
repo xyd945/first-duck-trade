@@ -11,6 +11,10 @@ user_data/config.json
 # block git from descending, so `!*.template` couldn't re-include them.)
 user_data/configs/*.json
 user_data/configs/.*
+# The FreqAI base config is deliberately secrets-free (dry-run, empty
+# exchange keys, no api_server) and is read verbatim — no env rendering —
+# so unlike the instance configs it is committed, not templated (issue #47).
+!user_data/configs/config-freqai-base.json
 
 # Freqtrade download data
 user_data/data/
@@ -42,10 +46,17 @@ user_data/tradesv3*.sqlite-shm
 user_data/tradesv3*.sqlite-wal
 
 # LLM-generated strategy candidates (runtime artifacts)
-# Keep the base class and .gitkeep so the dir + import path survive
+# Keep the base classes and .gitkeep so the dir + import path survive
 user_data/strategies/candidates/*
 !user_data/strategies/candidates/.gitkeep
 !user_data/strategies/candidates/base_generated.py
+!user_data/strategies/candidates/base_freqai.py
+
+# FreqAI runtime artifacts (issue #47): trained models are purged after
+# evaluation anyway; rendered per-candidate configs are regenerated from
+# their specs at registration time
+user_data/models/
+user_data/configs/freqai/
 
 # Jupyter Notebooks
 .ipynb_checkpoints

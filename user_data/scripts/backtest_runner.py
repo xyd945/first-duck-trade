@@ -53,6 +53,7 @@ def run_backtest(
     use_sandbox: bool = True,
     timeout_seconds: int = 300,
     export_trades: bool = False,
+    freqai_model: str = None,
 ) -> dict:
     """
     Run a Freqtrade backtest via Docker and return parsed results.
@@ -76,6 +77,15 @@ def run_backtest(
         If True, write the per-trade list to a deterministic path inside
         user_data/backtest_results/ and return its host path under
         result['trades_export_path']. Used by R2d trade attribution.
+    freqai_model : str
+        FreqAI model class (e.g. "LightGBMRegressor"). When set, the run
+        uses the freqtrade-freqai service (stable_freqai image — ships the
+        ML deps and higher resource limits) and passes --freqaimodel.
+        FreqAI backtests REQUIRE an explicit timerange (training windows
+        slide across it), so timerange=None is rejected up front. Callers
+        should also pass a per-candidate config (freqai block + unique
+        identifier) and a much larger timeout — the run retrains once per
+        backtest_period_days per pair.
 
     Returns
     -------
@@ -102,6 +112,14 @@ def run_backtest(
     if config_path is None:
         config_path = "/freqtrade/user_data/config.json"
 
+    if freqai_model and not timerange:
+        return {
+            "success": False,
+            "strategy": strategy_name,
+            "error": "FreqAI backtests require an explicit timerange "
+                     "(the training window slides across it)",
+        }
+
     # Compose file is mounted at /app/docker-compose.yml inside the orchestrator.
     # --project-directory must point to the HOST path so volume mounts resolve correctly.
     compose_file = str(PROJECT_ROOT / "docker-compose.yml")
@@ -109,13 +127,15 @@ def run_backtest(
            "-f", compose_file,
            "--project-directory", HOST_PROJECT_DIR]
 
-    if use_sandbox:
+    if use_sandbox or freqai_model:
         # Use the sandboxed profile (--profile must come before 'run')
         cmd.extend(["--profile", "backtest"])
 
     cmd.extend(["run", "--rm"])
 
-    if use_sandbox:
+    if freqai_model:
+        cmd.append("freqtrade-freqai")
+    elif use_sandbox:
         cmd.append("freqtrade-backtest")
     else:
         cmd.append("freqtrade-sweep")  # Use any running instance
@@ -127,6 +147,9 @@ def run_backtest(
         "--timeframe", timeframe,
         "--config", config_path,
     ])
+
+    if freqai_model:
+        cmd.extend(["--freqaimodel", freqai_model])
 
     # R2d: per-trade attribution needs Freqtrade's trade export. Recent
     # Freqtrade deprecated --export-filename — we now pass an isolated
@@ -363,9 +386,19 @@ def parse_backtest_output(output: str, strategy_name: str, timerange: str = None
         r"Absolute drawdown\s*│\s*([-\d.]+)", output, default=0.0
     )
 
-    # Risk metrics
-    result["sharpe"] = extract_value(r"Sharpe\s*│\s*([-\d.]+)", output, default=0.0)
-    result["sortino"] = extract_value(r"Sortino\s*│\s*([-\d.]+)", output, default=0.0)
+    # Risk metrics. Freqtrade 2026.x labels these rows "Sharpe (closed
+    # trades)" / "Sortino (closed trades)" — the bare "Sharpe │" pattern
+    # stopped matching and silently returned 0.0 for every walk-forward
+    # window (the third silent-zero scraper bug; found during the issue #47
+    # shakedown). Tolerate an optional parenthetical suffix; the first
+    # matching row is the closed-trades metric, same source the JSON
+    # artifact path reports.
+    result["sharpe"] = extract_value(
+        r"Sharpe(?:\s*\([^)]*\))?\s*│\s*([-\d.]+)", output, default=0.0
+    )
+    result["sortino"] = extract_value(
+        r"Sortino(?:\s*\([^)]*\))?\s*│\s*([-\d.]+)", output, default=0.0
+    )
     result["profit_factor"] = extract_value(
         r"Profit factor\s*│\s*([-\d.]+)", output, default=0.0
     )

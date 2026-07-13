@@ -31,7 +31,7 @@ except ImportError:
     def notify_reflector_summary(*a, **kw): pass
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -251,9 +251,20 @@ def job_fetch_macro_data():
 def job_fetch_ohlcv():
     """Weekly: refresh OKX OHLCV feathers used by mini-/full-backtests.
 
-    Walk-forward gate defaults to 3 splits × 60 days = 180 days; we pull 200
-    days as a safety buffer. Freqtrade incrementally appends — re-running is
-    idempotent and only fetches what's new.
+    Depth: 400 days. Sizing: the longest backtest window is 180 days
+    (full backtest and 3×60d walk-forward), and FreqAI candidates
+    additionally train on up to train_period_days = 180 (the freqai_spec
+    validator's upper bound) BEFORE the earliest backtest date, plus
+    startup candles — 180 + 180 + slack. Rule candidates alone only need
+    ~200; the old 200-day buffer would leave a freshly-bootstrapped
+    machine unable to train FreqAI's earliest windows (issue #47).
+    Freqtrade incrementally appends — re-running is idempotent and only
+    fetches what's new.
+
+    Pairs/timeframe come from config.json, UNIONED with the pair_whitelist
+    of config-freqai-base.json so FreqAI backtests can never reference data
+    this job doesn't download — the two lists are identical today, but the
+    union makes drift harmless instead of silently breaking ML candidates.
 
     Runs Saturday 19:30 UTC, 30 min before generation, so the Saturday
     mini-backtests and Sunday full backtests both see fresh data. Without
@@ -270,6 +281,21 @@ def job_fetch_ohlcv():
     except Exception as e:
         log.error(f"OHLCV fetch: could not read pair_whitelist from config: {e}")
         return
+    # Union in the FreqAI base config's pairs (issue #47). Missing file is
+    # fine — the freqai path is optional; any other read error is logged
+    # but never blocks the refresh of the main pairs.
+    try:
+        with open(BASE_DIR / "configs" / "config-freqai-base.json") as fh:
+            freqai_pairs = (json.load(fh).get("exchange", {})
+                            .get("pair_whitelist", []))
+        for p in freqai_pairs:
+            if p not in pairs:
+                pairs.append(p)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning(f"OHLCV fetch: could not union freqai config pairs: {e}")
+
     if not pairs:
         log.warning("OHLCV fetch: no pairs configured, skipping")
         return
@@ -284,7 +310,7 @@ def job_fetch_ohlcv():
         "--config", "/freqtrade/user_data/config.json",
         "--pairs", *pairs,
         "--timeframes", timeframe,
-        "--days", "200",
+        "--days", "400",
     ]
     log.info(f"OHLCV fetch: {' '.join(cmd)}")
     try:
@@ -877,7 +903,7 @@ def _find_btc_data_file() -> Path | None:
     return None
 
 
-def job_backtest_candidates():
+def job_backtest_candidates(only_name: str | None = None):
     """Weekly (after generation): backtest all uneval'd candidates.
 
     For each candidate:
@@ -886,6 +912,21 @@ def job_backtest_candidates():
          optionally walk-forward) against the result
       3. Promote only if all gates pass — otherwise retire with a gate-aware
          verdict so the failure memory captures *which* gate killed it
+
+    FreqAI candidates (spec_type='freqai', issue #47) run through the SAME
+    lifecycle with three differences:
+      - backtests use the freqtrade-freqai service, the candidate's rendered
+        config (configs/freqai/<name>.json), an explicit timerange, and a
+        much larger timeout (model training dominates the runtime)
+      - walk-forward is MANDATORY: it runs even when R7_WALK_FORWARD is off,
+        and a skipped/failed walk-forward blocks promotion even when
+        STRICT_PROMOTION_GATES is off — an ML candidate that only looks good
+        on one window is the overfitting failure mode this exists to catch
+      - model artifacts are purged after evaluation (win or lose)
+
+    `only_name` restricts the run to a single candidate — used by targeted
+    manual evaluations (e.g. shaking down one FreqAI candidate) without
+    touching the rest of the pool.
     """
     log.info("=== Job: Backtest candidates ===")
     try:
@@ -906,6 +947,8 @@ def job_backtest_candidates():
         )
 
         candidates = get_candidates()
+        if only_name:
+            candidates = [c for c in candidates if c["name"] == only_name]
         if not candidates:
             log.info("No candidates to backtest.")
             return
@@ -954,15 +997,57 @@ def job_backtest_candidates():
         for cand in candidates[:25]:
             name = cand["name"]
             target_regime = cand.get("target_regime", "all")
-            log.info(f"  Backtesting: {name} (regime={target_regime})")
+            is_freqai = (cand.get("spec_type") or "rule") == "freqai"
+            log.info(f"  Backtesting: {name} (regime={target_regime}"
+                     f"{', freqai' if is_freqai else ''})")
+
+            # FreqAI candidates carry their backtest wiring in the artifacts
+            # the renderer wrote: per-candidate config + spec sidecar (model
+            # family). Shared kwargs so the full backtest and every
+            # walk-forward window run identically.
+            freqai_kwargs = {}
+            if is_freqai:
+                from freqai_spec import (
+                    MODEL_FAMILIES, container_config_path, load_spec_sidecar,
+                )
+                sidecar = load_spec_sidecar(cand.get("filepath", "")) or {}
+                family = sidecar.get("model", {}).get("family", "LightGBMRegressor")
+                # The sidecar is a mutable file under user_data — never let
+                # it bypass the validated whitelist on its way to the
+                # --freqaimodel flag.
+                if family not in MODEL_FAMILIES:
+                    log.warning(f"  {name}: sidecar model family {family!r} not "
+                                f"in whitelist; using LightGBMRegressor")
+                    family = "LightGBMRegressor"
+                freqai_kwargs = {
+                    "config_path": container_config_path(name),
+                    "freqai_model": family,
+                    "timeout_seconds": int(
+                        os.environ.get("FREQAI_BACKTEST_TIMEOUT", "5400")),
+                }
 
             try:
-                result = run_backtest(
-                    strategy_name=name,
-                    use_sandbox=True,
-                    timeout_seconds=600,
-                    export_trades=True,  # R2d
-                )
+                if is_freqai:
+                    # FreqAI requires an explicit timerange — mirror the
+                    # 6-month window run_backtest defaults to for rule
+                    # candidates when given all available data.
+                    bt_end = datetime.now(timezone.utc)
+                    bt_start = bt_end - timedelta(days=180)
+                    result = run_backtest(
+                        strategy_name=name,
+                        timerange=(f"{bt_start.strftime('%Y%m%d')}-"
+                                   f"{bt_end.strftime('%Y%m%d')}"),
+                        use_sandbox=True,
+                        export_trades=True,  # R2d
+                        **freqai_kwargs,
+                    )
+                else:
+                    result = run_backtest(
+                        strategy_name=name,
+                        use_sandbox=True,
+                        timeout_seconds=600,
+                        export_trades=True,  # R2d
+                    )
 
                 if not result.get("success"):
                     err = result.get("error", "unknown")
@@ -1030,30 +1115,55 @@ def job_backtest_candidates():
                 gate_verdicts.append(v)
                 log.info(f"  {name} [buyhold]: {v['verdict']} — {v['reason']}")
 
-                if enable_wf:
+                # Baseline profitability, computed here because the freqai
+                # walk-forward decision below needs it. (Promotion still
+                # requires it AND all gates — see further down.)
+                baseline_ok = total_trades >= 20 and profit_pct > 0 and sharpe > 0
+
+                # Walk-forward is opt-in for rule candidates but MANDATORY
+                # for freqai ones — overfitting to a single window is the
+                # canonical ML failure mode (issue #47). Exception: a freqai
+                # candidate that already failed baseline can't promote no
+                # matter what walk-forward says, so don't spend 3 windows of
+                # model training on it (the mandatory-WF promotion rule below
+                # still holds — a skipped WF blocks promotion).
+                run_wf = (enable_wf and not is_freqai) or (is_freqai and baseline_ok)
+                if run_wf:
                     log.info(f"  {name} [walk-forward]: running {wf_splits} windows × {wf_days}d…")
                     wf_results = run_walk_forward(
                         name,
                         backtest_fn=lambda n, tr: run_backtest(
                             strategy_name=n, timerange=tr,
-                            use_sandbox=True, timeout_seconds=600,
+                            use_sandbox=True,
+                            **(freqai_kwargs or {"timeout_seconds": 600}),
                         ),
                         n_splits=wf_splits, days_per_split=wf_days,
                     )
                     v = gate_walk_forward(wf_results)
+                elif is_freqai:
+                    v = _skip("SKIP_WF", "freqai candidate failed baseline — "
+                              "walk-forward skipped to save model training")
                 else:
                     v = _skip("SKIP_WF", "walk-forward disabled "
                               "(set R7_WALK_FORWARD=true to enable)")
+                wf_verdict = v
                 gate_verdicts.append(v)
                 log.info(f"  {name} [walk-forward]: {v['verdict']} — {v['reason']}")
 
-                # Promotion = baseline profitability AND every gate passes
-                # (strictly, in strict_mode).
-                baseline_ok = total_trades >= 20 and profit_pct > 0 and sharpe > 0
+                # Promotion = baseline profitability (computed above, before
+                # the walk-forward decision) AND every gate passes (strictly,
+                # in strict_mode).
                 if strict_mode:
                     all_gates_passed = all(is_strict_pass(v) for v in gate_verdicts)
                 else:
                     all_gates_passed = all(v["passed"] for v in gate_verdicts)
+
+                # FreqAI promotion requires REAL walk-forward evidence even
+                # in non-strict mode — a skipped WF verdict carries
+                # passed=True for legacy aggregation, which must never be
+                # enough to promote an ML candidate (issue #47).
+                if is_freqai and not is_strict_pass(wf_verdict):
+                    all_gates_passed = False
 
                 # R7.4: correlation gate is expensive (reads zip files per
                 # active strategy) — only run it when the candidate is
@@ -1102,6 +1212,16 @@ def job_backtest_candidates():
                     # FAIL_UNPROFITABLE for a strategy that did make money
                     # but lost to HODL).
                     failed = next((v for v in gate_verdicts if not v["passed"]), None)
+                    if failed is None and is_freqai and not is_strict_pass(wf_verdict):
+                        # The only blocker was the mandatory-WF rule: the WF
+                        # verdict was a skip (passed=True), so the generic
+                        # first-failing-gate scan finds nothing. Name the ML
+                        # failure explicitly for the failure memory.
+                        failed = {
+                            "verdict": "FAIL_ML_NO_WALKFORWARD",
+                            "reason": ("freqai candidates require a real "
+                                       f"walk-forward pass; got: {wf_verdict['reason']}"),
+                        }
                     verdict = failed["verdict"] if failed else "FAIL_GATES"
                     reason = failed["reason"] if failed else "blocked by gates"
                     retire_strategy(cand["id"], reason=reason, verdict=verdict)
@@ -1109,6 +1229,16 @@ def job_backtest_candidates():
 
             except Exception as e:
                 log.warning(f"  {name}: error — {e}")
+            finally:
+                if is_freqai:
+                    # Win or lose, drop the candidate's model artifacts —
+                    # a full backtest + walk-forward leaves O(100MB) per
+                    # candidate under user_data/models/.
+                    try:
+                        from freqai_spec import purge_model_artifacts
+                        purge_model_artifacts(name)
+                    except Exception as e:
+                        log.warning(f"  {name}: model artifact purge failed — {e}")
 
     except Exception as e:
         log.error(f"Candidate backtesting failed: {e}", exc_info=True)
