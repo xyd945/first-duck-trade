@@ -138,6 +138,14 @@ def validate_freqai_spec(spec: dict) -> None:
     _require(spec["target_regime"] in VALID_REGIMES,
              f"target_regime must be one of {VALID_REGIMES}")
 
+    # generation_id reaches the rendered file — treat it like `name`, not
+    # like free text. Optional, but when present it must be a plain token
+    # (the renderer additionally json.dumps-es it as defense in depth).
+    gen_id = spec.get("generation_id", "manual")
+    _require(isinstance(gen_id, str)
+             and bool(re.match(r"^[A-Za-z0-9._-]{1,64}$", gen_id)),
+             "generation_id must match ^[A-Za-z0-9._-]{1,64}$")
+
     # Features: whitelisted keys only, no duplicates, enough signal to learn
     features = spec["features"]
     _require(isinstance(features, list) and len(features) >= MIN_FEATURES,
@@ -160,7 +168,9 @@ def validate_freqai_spec(spec: dict) -> None:
     model = spec["model"]
     _require(isinstance(model, dict) and model.get("family") in MODEL_FAMILIES,
              f"model.family must be one of {MODEL_FAMILIES}")
-    _check_bounded(model.get("params", {}), MODEL_PARAM_BOUNDS, "model.params")
+    model_params = model.get("params") or {}
+    _require(isinstance(model_params, dict), "model.params must be an object")
+    _check_bounded(model_params, MODEL_PARAM_BOUNDS, "model.params")
 
     # Thresholds: entry strictly above exit, both sane
     thresholds = spec["thresholds"]
@@ -192,10 +202,21 @@ def validate_freqai_spec(spec: dict) -> None:
     risk = spec["risk"]
     _require(isinstance(risk, dict), "risk must be an object")
     stoploss = risk.get("stoploss")
-    _require(isinstance(stoploss, (int, float)) and -0.5 <= stoploss < 0,
+    _require(isinstance(stoploss, (int, float)) and not isinstance(stoploss, bool)
+             and -0.5 <= stoploss < 0,
              "risk.stoploss must be a negative number >= -0.5")
-    _require(isinstance(risk.get("minimal_roi"), dict) and risk["minimal_roi"],
+    roi = risk.get("minimal_roi")
+    _require(isinstance(roi, dict) and roi,
              "risk.minimal_roi must be a non-empty dict")
+    # ROI contents render into Python source via json.dumps — a bool/null
+    # value would emit `true`/`null` (NameError at import), and freqtrade
+    # needs minute-string keys anyway. Reject anything but digits -> numbers.
+    for k, v in roi.items():
+        _require(isinstance(k, str) and k.isdigit(),
+                 f"minimal_roi key {k!r} must be a string of digits (minutes)")
+        _require(isinstance(v, (int, float)) and not isinstance(v, bool)
+                 and -1.0 <= v <= 10.0,
+                 f"minimal_roi[{k!r}] must be a number in [-1, 10]")
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +238,7 @@ class {name}(BaseFreqaiStrategy):
     STRATEGY_THESIS = {thesis}
     STRATEGY_ARCHETYPE = "ml_regressor"
     TARGET_REGIME = "{target_regime}"
-    GENERATION_ID = "{generation_id}"
+    GENERATION_ID = {generation_id}
 
     FREQAI_FEATURES = {features}
 
@@ -236,7 +257,10 @@ def render_freqai_strategy(spec: dict) -> str:
         name=spec["name"],
         thesis=json.dumps(spec["thesis"]),
         target_regime=spec["target_regime"],
-        generation_id=spec.get("generation_id", "manual"),
+        # json.dumps as defense in depth — the validator already restricts
+        # generation_id to a plain token, but a template must never trust
+        # a spec string enough to place it raw inside quotes.
+        generation_id=json.dumps(spec.get("generation_id", "manual")),
         features=json.dumps(spec["features"]),
         entry_threshold=float(spec["thresholds"]["entry"]),
         exit_threshold=float(spec["thresholds"]["exit"]),

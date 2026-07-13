@@ -981,12 +981,21 @@ def job_backtest_candidates(only_name: str | None = None):
             # walk-forward window run identically.
             freqai_kwargs = {}
             if is_freqai:
-                from freqai_spec import container_config_path, load_spec_sidecar
+                from freqai_spec import (
+                    MODEL_FAMILIES, container_config_path, load_spec_sidecar,
+                )
                 sidecar = load_spec_sidecar(cand.get("filepath", "")) or {}
+                family = sidecar.get("model", {}).get("family", "LightGBMRegressor")
+                # The sidecar is a mutable file under user_data — never let
+                # it bypass the validated whitelist on its way to the
+                # --freqaimodel flag.
+                if family not in MODEL_FAMILIES:
+                    log.warning(f"  {name}: sidecar model family {family!r} not "
+                                f"in whitelist; using LightGBMRegressor")
+                    family = "LightGBMRegressor"
                 freqai_kwargs = {
                     "config_path": container_config_path(name),
-                    "freqai_model": sidecar.get("model", {}).get(
-                        "family", "LightGBMRegressor"),
+                    "freqai_model": family,
                     "timeout_seconds": int(
                         os.environ.get("FREQAI_BACKTEST_TIMEOUT", "5400")),
                 }
@@ -1080,10 +1089,20 @@ def job_backtest_candidates(only_name: str | None = None):
                 gate_verdicts.append(v)
                 log.info(f"  {name} [buyhold]: {v['verdict']} — {v['reason']}")
 
+                # Baseline profitability, computed here because the freqai
+                # walk-forward decision below needs it. (Promotion still
+                # requires it AND all gates — see further down.)
+                baseline_ok = total_trades >= 20 and profit_pct > 0 and sharpe > 0
+
                 # Walk-forward is opt-in for rule candidates but MANDATORY
                 # for freqai ones — overfitting to a single window is the
-                # canonical ML failure mode (issue #47).
-                if enable_wf or is_freqai:
+                # canonical ML failure mode (issue #47). Exception: a freqai
+                # candidate that already failed baseline can't promote no
+                # matter what walk-forward says, so don't spend 3 windows of
+                # model training on it (the mandatory-WF promotion rule below
+                # still holds — a skipped WF blocks promotion).
+                run_wf = (enable_wf and not is_freqai) or (is_freqai and baseline_ok)
+                if run_wf:
                     log.info(f"  {name} [walk-forward]: running {wf_splits} windows × {wf_days}d…")
                     wf_results = run_walk_forward(
                         name,
@@ -1095,6 +1114,9 @@ def job_backtest_candidates(only_name: str | None = None):
                         n_splits=wf_splits, days_per_split=wf_days,
                     )
                     v = gate_walk_forward(wf_results)
+                elif is_freqai:
+                    v = _skip("SKIP_WF", "freqai candidate failed baseline — "
+                              "walk-forward skipped to save model training")
                 else:
                     v = _skip("SKIP_WF", "walk-forward disabled "
                               "(set R7_WALK_FORWARD=true to enable)")
@@ -1102,9 +1124,9 @@ def job_backtest_candidates(only_name: str | None = None):
                 gate_verdicts.append(v)
                 log.info(f"  {name} [walk-forward]: {v['verdict']} — {v['reason']}")
 
-                # Promotion = baseline profitability AND every gate passes
-                # (strictly, in strict_mode).
-                baseline_ok = total_trades >= 20 and profit_pct > 0 and sharpe > 0
+                # Promotion = baseline profitability (computed above, before
+                # the walk-forward decision) AND every gate passes (strictly,
+                # in strict_mode).
                 if strict_mode:
                     all_gates_passed = all(is_strict_pass(v) for v in gate_verdicts)
                 else:

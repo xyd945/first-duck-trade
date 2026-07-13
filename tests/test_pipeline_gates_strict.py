@@ -151,9 +151,12 @@ def test_orchestrator_appends_skip_verdict_when_walk_forward_disabled():
     at all → silent pass. New: explicit SKIP_WF appended so strict mode
     catches it (or operator must explicitly run WF for promotion)."""
     src = (ROOT / "user_data" / "scripts" / "orchestrator.py").read_text()
-    # Issue #47 widened the guard: walk-forward also force-runs for freqai
-    # candidates. The SKIP_WF fallback for disabled-WF rule candidates stays.
-    assert "if enable_wf or is_freqai:" in src
+    # Issue #47 widened the guard: walk-forward also force-runs for
+    # promotable freqai candidates (and is skipped for baseline-failed ones
+    # to save model training). The SKIP_WF fallback for disabled-WF rule
+    # candidates stays.
+    assert ("run_wf = (enable_wf and not is_freqai) "
+            "or (is_freqai and baseline_ok)") in src
     assert 'SKIP_WF' in src
 
 

@@ -117,6 +117,28 @@ def test_rejects_positive_stoploss(spec):
     _expect_error(spec, "stoploss")
 
 
+def test_rejects_hostile_generation_id(spec):
+    spec["generation_id"] = 'x"\nimport os\ny = "'
+    _expect_error(spec, "generation_id")
+
+
+def test_rejects_null_model_params(spec):
+    spec["model"]["params"] = None
+    validate_freqai_spec(spec)  # null coerces to {} — no params is fine
+    spec["model"]["params"] = ["not", "a", "dict"]
+    _expect_error(spec, "model.params must be an object")
+
+
+def test_rejects_non_numeric_minimal_roi_values(spec):
+    spec["risk"]["minimal_roi"] = {"0": True}
+    _expect_error(spec, "must be a number")
+
+
+def test_rejects_non_digit_minimal_roi_keys(spec):
+    spec["risk"]["minimal_roi"] = {"1h": 0.05}
+    _expect_error(spec, "string of digits")
+
+
 def test_rejects_train_period_out_of_bounds(spec):
     spec["freqai"]["train_period_days"] = 5
     _expect_error(spec, "train_period_days")
@@ -327,3 +349,54 @@ def test_safe_fill_never_backfills():
     assert filled.iloc[0] == 0.0
     assert filled.iloc[1] == 0.0
     assert filled.iloc[3] == 5.0  # ffill from the past is fine
+
+
+def test_safe_fill_neutralizes_inf():
+    """Zero rolling-std windows produce ±inf (volume_z, bb_width) — LightGBM
+    rejects inf, and ffill must not propagate it forward."""
+    import numpy as np
+    import pandas as pd
+    from indicators.freqai_features import _safe_fill
+
+    s = pd.Series([1.0, np.inf, -np.inf, 2.0])
+    filled = _safe_fill(s)
+    assert np.isfinite(filled).all()
+    assert filled.iloc[1] == 1.0  # inf → NaN → ffilled from the past
+
+
+def test_expand_features_raise_loudly_on_short_input(sample_ohlcv):
+    """pandas_ta returns None when the window is shorter than the indicator
+    period. Silently zero-filling that would score a candidate on fabricated
+    features — it must raise instead (orchestrator turns it into a clean
+    FAIL_BACKTEST retirement)."""
+    from indicators.freqai_features import add_expand_features
+
+    tiny = sample_ohlcv.head(5).copy()
+    with pytest.raises(ValueError, match="returned no data"):
+        add_expand_features(tiny, ["adx"], 50)
+
+
+def test_rendered_generation_id_is_json_escaped(spec):
+    """Defense in depth: even though validation restricts generation_id to a
+    plain token, the template must emit it via json.dumps, never raw inside
+    quotes."""
+    code = render_freqai_strategy(spec)
+    assert 'GENERATION_ID = "freqai-spec-baseline"' in code
+
+
+def test_console_scraper_parses_suffixed_sharpe_labels():
+    """freqtrade 2026.x labels the rows 'Sharpe (closed trades)' — the bare
+    'Sharpe │' regex silently returned 0.0 for every walk-forward window
+    (console-parse path), making gate_walk_forward fail everything."""
+    from backtest_runner import parse_backtest_output
+
+    output = (
+        "│ Total profit %                         │ -10.13%     │\n"
+        "│ Sharpe (closed trades)                 │ -7.50       │\n"
+        "│ Sortino (closed trades)                │ -8.23       │\n"
+        "│ Profit factor                          │ 0.60        │\n"
+    )
+    r = parse_backtest_output(output, "AnyStrategy")
+    assert r["sharpe"] == -7.50
+    assert r["sortino"] == -8.23
+    assert r["profit_factor"] == 0.60

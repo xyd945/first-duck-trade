@@ -35,8 +35,15 @@ import pandas as pd
 
 
 def _safe_fill(series: pd.Series) -> pd.Series:
-    """ffill then zero-fill the leading gap. No bfill — see module docstring."""
-    return series.ffill().fillna(0.0)
+    """ffill then zero-fill the leading gap. No bfill — see module docstring.
+
+    ±inf (e.g. a zero rolling-std in a flat window dividing a z-score)
+    becomes NaN first — LightGBM rejects inf inputs, and ffill would
+    otherwise propagate it forward across the window.
+    """
+    import numpy as np
+    # np.nan (not pd.NA) keeps the series float-dtyped for LightGBM
+    return series.replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -62,8 +69,9 @@ def _f_natr(df: pd.DataFrame, period: int) -> pd.Series:
 def _f_adx(df: pd.DataFrame, period: int) -> pd.Series:
     import pandas_ta as ta
     adx = ta.adx(df["high"], df["low"], df["close"], length=period)
-    # pandas_ta returns a frame; the ADX line is ADX_<period>
-    return adx[f"ADX_{period}"]
+    # pandas_ta returns a frame (or None on too-short input — _computed
+    # in the caller raises the loud error); the ADX line is ADX_<period>
+    return adx[f"ADX_{period}"] if adx is not None else None
 
 
 def _f_bb_width(df: pd.DataFrame, period: int) -> pd.Series:
@@ -135,6 +143,21 @@ ALL_FEATURE_KEYS = (
 )
 
 
+def _computed(key: str, value, period=None) -> pd.Series:
+    """Guard a feature function's output. pandas_ta returns None (not an
+    empty series) when the input is shorter than the indicator period —
+    silently zero-filling that would score a candidate on fabricated
+    features, so fail loudly instead; the orchestrator turns the crash
+    into a clean FAIL_BACKTEST retirement."""
+    if value is None:
+        detail = f" (period={period})" if period is not None else ""
+        raise ValueError(
+            f"feature {key!r} returned no data{detail} — "
+            f"input window too short for the indicator"
+        )
+    return value
+
+
 def add_expand_features(
     dataframe: pd.DataFrame, features: list[str], period: int
 ) -> pd.DataFrame:
@@ -143,13 +166,14 @@ def add_expand_features(
     Column names follow FreqAI's expand_all convention ("%-<key>-period");
     FreqAI itself appends the concrete period / timeframe / pair suffixes.
     Unknown keys are ignored here — the spec validator is the gate that
-    rejects them loudly; this function stays total so a base-class default
-    never crashes a backtest container.
+    rejects them loudly.
     """
     for key in features:
         fn = EXPAND_FEATURES.get(key)
         if fn is not None:
-            dataframe[f"%-{key}-period"] = _safe_fill(fn(dataframe, period))
+            dataframe[f"%-{key}-period"] = _safe_fill(
+                _computed(key, fn(dataframe, period), period)
+            )
     return dataframe
 
 
@@ -158,7 +182,7 @@ def add_basic_features(dataframe: pd.DataFrame, features: list[str]) -> pd.DataF
     for key in features:
         fn = BASIC_FEATURES.get(key)
         if fn is not None:
-            dataframe[f"%-{key}"] = _safe_fill(fn(dataframe))
+            dataframe[f"%-{key}"] = _safe_fill(_computed(key, fn(dataframe)))
     return dataframe
 
 

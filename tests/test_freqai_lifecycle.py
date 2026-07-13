@@ -266,10 +266,20 @@ def _orchestrator_source() -> str:
 
 
 def test_orchestrator_forces_walk_forward_for_freqai():
-    """Walk-forward must run for freqai candidates even when the
-    R7_WALK_FORWARD env toggle is off."""
+    """Walk-forward must run for promotable freqai candidates even when the
+    R7_WALK_FORWARD env toggle is off — but is skipped (with an explicit
+    SKIP_WF verdict that still blocks promotion) when the candidate already
+    failed baseline, to avoid burning model training on a dead candidate."""
     src = _orchestrator_source()
-    assert "if enable_wf or is_freqai:" in src
+    assert ("run_wf = (enable_wf and not is_freqai) "
+            "or (is_freqai and baseline_ok)") in src
+
+
+def test_orchestrator_revalidates_sidecar_model_family():
+    """The sidecar file is mutable — the --freqaimodel value must be
+    re-checked against the whitelist at backtest time."""
+    src = _orchestrator_source()
+    assert "family not in MODEL_FAMILIES" in src
 
 
 def test_orchestrator_blocks_freqai_promotion_without_strict_wf_pass():
