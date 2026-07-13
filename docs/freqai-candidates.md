@@ -95,8 +95,10 @@ automatically — no separate job.
 FreqAI candidates face every existing gate (regime-conditional floor, beat-buy-hold,
 walk-forward, correlation) plus one extra rule: promotion requires a REAL
 walk-forward pass (`is_strict_pass`), regardless of `STRICT_PROMOTION_GATES`. The
-orchestrator force-runs walk-forward for freqai candidates even when
-`R7_WALK_FORWARD` is off.
+orchestrator force-runs walk-forward for baseline-passing freqai candidates even
+when `R7_WALK_FORWARD` is off; candidates that already failed baseline skip the
+windows (they can't promote anyway, and each window costs model training) but
+still record an explicit `SKIP_WF` verdict that blocks promotion.
 
 ML-specific failure verdicts in the registry / failure memory:
 
