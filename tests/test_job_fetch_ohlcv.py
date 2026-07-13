@@ -44,8 +44,9 @@ def test_fetch_ohlcv_builds_correct_docker_command(cfg_with_pairs):
     assert "download-data" in cmd
     # All configured pairs propagated
     assert "BTC/USDT" in cmd and "ETH/USDT" in cmd and "SOL/USDT" in cmd
-    # 200 days covers walk-forward (3 × 60) with safety buffer
-    assert "--days" in cmd and cmd[cmd.index("--days") + 1] == "200"
+    # 400 days: 180 (longest backtest/walk-forward window) + 180 (max
+    # freqai train_period_days of pre-window training data) + slack
+    assert "--days" in cmd and cmd[cmd.index("--days") + 1] == "400"
     assert "--timeframes" in cmd and cmd[cmd.index("--timeframes") + 1] == "1h"
 
 

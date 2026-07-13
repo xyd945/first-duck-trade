@@ -251,9 +251,19 @@ def job_fetch_macro_data():
 def job_fetch_ohlcv():
     """Weekly: refresh OKX OHLCV feathers used by mini-/full-backtests.
 
-    Walk-forward gate defaults to 3 splits × 60 days = 180 days; we pull 200
-    days as a safety buffer. Freqtrade incrementally appends — re-running is
-    idempotent and only fetches what's new.
+    Depth: 400 days. Sizing: the longest backtest window is 180 days
+    (full backtest and 3×60d walk-forward), and FreqAI candidates
+    additionally train on up to train_period_days = 180 (the freqai_spec
+    validator's upper bound) BEFORE the earliest backtest date, plus
+    startup candles — 180 + 180 + slack. Rule candidates alone only need
+    ~200; the old 200-day buffer would leave a freshly-bootstrapped
+    machine unable to train FreqAI's earliest windows (issue #47).
+    Freqtrade incrementally appends — re-running is idempotent and only
+    fetches what's new.
+
+    Pairs/timeframe come from config.json; config-freqai-base.json must
+    keep its pair_whitelist a subset of config.json's, or FreqAI backtests
+    will miss data this job never downloads.
 
     Runs Saturday 19:30 UTC, 30 min before generation, so the Saturday
     mini-backtests and Sunday full backtests both see fresh data. Without
@@ -284,7 +294,7 @@ def job_fetch_ohlcv():
         "--config", "/freqtrade/user_data/config.json",
         "--pairs", *pairs,
         "--timeframes", timeframe,
-        "--days", "200",
+        "--days", "400",
     ]
     log.info(f"OHLCV fetch: {' '.join(cmd)}")
     try:

@@ -125,6 +125,21 @@ lose — a full evaluation leaves O(100MB) per candidate otherwise.
   gated on evidence from manually-authored specs first (issue #47's own
   recommendation).
 
+## Data provisioning
+
+FreqAI reads the same OKX futures feathers the rule-based backtests use
+(`user_data/data/okx/futures/`), refreshed weekly by the orchestrator's
+`job_fetch_ohlcv` (Saturday 19:30 UTC). Two constraints that job imposes:
+
+- **Depth**: it downloads 400 days — the 180-day backtest window plus up to
+  180 days of pre-window training data (the spec validator's `train_period_days`
+  ceiling) plus slack. A FreqAI backtest needs training history BEFORE its
+  timerange start; if you widen the backtest window or raise the train-period
+  bound, resize the fetch depth with it.
+- **Pairs**: the job reads its pair list from `config.json`. Keep
+  `config-freqai-base.json`'s `pair_whitelist` a subset of `config.json`'s, or
+  FreqAI backtests will look for data the refresh never downloads.
+
 ## Operational cost
 
 Measured on the live host (baseline spec, 3 pairs, 1h timeframe): a 6-month FreqAI
