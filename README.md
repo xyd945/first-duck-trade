@@ -55,6 +55,19 @@ docker exec ft-orchestrator python -m pytest tests/ -q
 
 The host doesn't need pytest installed; the container ships with it.
 
+### After pulling changes
+
+`ft-orchestrator` bind-mounts `docker-compose.yml` as a single file. Git
+replaces files on checkout/pull/merge, and single-file bind mounts can go
+stale (or show a torn, truncated view) when the underlying inode changes —
+the symptom is `docker compose` commands from inside the orchestrator
+failing with `invalid interpolation format` errors while the host file
+validates fine. After any git operation that touches `docker-compose.yml`:
+
+```bash
+docker compose up -d --force-recreate orchestrator
+```
+
 ## Architecture
 
 ```
@@ -164,7 +177,13 @@ and thresholds are validated against whitelists and bounds — rendered candidat
 contain zero executable code), same registry lifecycle, same gates — plus a stricter
 rule: walk-forward is mandatory and a skipped walk-forward blocks promotion
 regardless of `STRICT_PROMOTION_GATES`. FreqAI candidates are excluded from hyperopt
-rescue and (for now) from live deployment. See `docs/freqai-candidates.md`.
+rescue and (for now) from live deployment.
+
+The LLM proposes ML experiments too (`freqai_generator.py`): batch-first
+propose/evaluate/report CLI whose prompt is built from the validator's own
+whitelists and bounds, with ML-specific failure memory and in-batch diversity
+pressure. Weekly automation is env-gated off by default (`FREQAI_WEEKLY_COUNT=0`).
+See `docs/freqai-candidates.md`.
 
 ### Reflector + generator feedback loops
 

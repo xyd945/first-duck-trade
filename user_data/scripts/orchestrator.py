@@ -777,7 +777,10 @@ def job_generate_strategies():
         log.info(f"  Reflector context: {len(reflector_insights)} chars from latest reflections")
 
         def failures_for(regime: str) -> str:
-            rows = get_recent_failures(k=8, regime=regime)
+            # spec_type='rule': a rule-generation prompt can't act on an ML
+            # experiment's failure — freqai failures feed the freqai
+            # generator's own prompt instead (issue #47).
+            rows = get_recent_failures(k=8, regime=regime, spec_type="rule")
             log.info(f"  Failure memory for regime={regime}: {len(rows)} prior failures")
             return _format_failure_examples(rows)
 
@@ -885,6 +888,25 @@ def job_generate_strategies():
 
         passed = sum(1 for r in results if r.get("success"))
         log.info(f"Generation complete: {passed}/{len(results)} strategies passed validation")
+
+        # Issue #47 Phase 3a: LLM-proposed FreqAI experiment specs. Off by
+        # default (FREQAI_WEEKLY_COUNT=0) — the operator's primary workflow
+        # is manual batches via freqai_generator.py; turn this on once a
+        # few manual rounds look sane. Registered candidates ride the same
+        # Sunday backtest job as everything else.
+        freqai_count = int(os.environ.get("FREQAI_WEEKLY_COUNT", "0"))
+        if freqai_count > 0:
+            try:
+                from freqai_generator import propose_freqai_specs
+                freqai_results = propose_freqai_specs(
+                    count=freqai_count,
+                    context=context,
+                    reflector_insights=reflector_insights,
+                )
+                ok = sum(1 for r in freqai_results if r.get("success"))
+                log.info(f"FreqAI proposals: {ok}/{freqai_count} specs registered")
+            except Exception as e:
+                log.error(f"FreqAI spec proposal failed: {e}", exc_info=True)
 
     except Exception as e:
         log.error(f"Strategy generation failed: {e}", exc_info=True)

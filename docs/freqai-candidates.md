@@ -112,7 +112,43 @@ ML-specific failure verdicts in the registry / failure memory:
 Model artifacts (`user_data/models/<Name>/`) are purged after evaluation, win or
 lose — a full evaluation leaves O(100MB) per candidate otherwise.
 
-## What's excluded and why (Phase 3)
+## LLM-proposed experiments (Phase 3a)
+
+`freqai_generator.py` lets the LLM propose experiment specs — JSON only, never
+code. Every proposal passes through the same `validate_freqai_spec` +
+materialize/register path as a hand-written spec; a hallucinated feature or
+out-of-bounds param is a clean rejection whose error message is fed back to the
+LLM for a retry (up to 2 extra turns per spec).
+
+Anti-drift property: the system prompt's feature list and bounds are BUILT from
+the validator's constants (`freqai_spec` bounds, `freqai_features` keys) — a
+test asserts the sync, so extending the whitelist automatically teaches the
+prompt and the two can never disagree.
+
+Batch-first workflow (the operator's real loop — manual rounds of propose /
+evaluate / compare):
+
+```bash
+docker exec ft-orchestrator python /app/user_data/scripts/freqai_generator.py \
+    run-batch --count 3          # propose + evaluate + report in one go
+# or individually:
+#   propose --count N [--regime trending]
+#   evaluate [--limit N]         # full lifecycle per pending freqai candidate
+#   report                       # comparison table of every experiment so far
+```
+
+The prompt carries the ML failure memory (retired freqai experiments with
+their feature sets, horizons, thresholds, and verdicts — sourced from the spec
+sidecars) plus in-batch diversity pressure (each proposal sees the batch's
+prior specs and is told to differ structurally). Factory-owned fields
+(`spec_type`, `generation_id`) are stamped server-side — the LLM's values are
+ignored. Names are auto-suffixed on registry collision.
+
+Weekly automation exists but is OFF by default: set `FREQAI_WEEKLY_COUNT=N`
+to make the Saturday generation job add N LLM-proposed FreqAI specs alongside
+the rule-based batch. Leave it 0 until a few manual batches look sane.
+
+## What's excluded and why (Phase 3b)
 
 - **Deployment**: `get_deployment_eligible` filters `spec_type='freqai'`. The
   reconciler's `ft-deployed-*` containers run the non-ML image, and live FreqAI
@@ -120,10 +156,6 @@ lose — a full evaluation leaves O(100MB) per candidate otherwise.
   promoted FreqAI strategy means "research-validated", not "deployable".
 - **Hyperopt rescue**: excluded — rescue for an ML candidate is a new spec, not a
   parameter sweep.
-- **LLM-proposed specs**: the safe spec→renderer path is now in place; wiring the
-  generator/critic loop to propose `freqai_spec` JSONs is the natural next step,
-  gated on evidence from manually-authored specs first (issue #47's own
-  recommendation).
 
 ## Data provisioning
 

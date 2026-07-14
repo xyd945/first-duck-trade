@@ -161,6 +161,10 @@ services:
       - R7_WALK_FORWARD=${R7_WALK_FORWARD:-1}
       - R7_WF_SPLITS=${R7_WF_SPLITS:-3}
       - R7_WF_DAYS=${R7_WF_DAYS:-60}
+      # Issue #47 Phase 3a: how many LLM-proposed FreqAI specs the weekly
+      # generation job adds alongside rule candidates. 0 = off (default) —
+      # use freqai_generator.py for manual batches until enabling this.
+      - FREQAI_WEEKLY_COUNT=${FREQAI_WEEKLY_COUNT:-0}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - HOST_PROJECT_DIR=${PWD}

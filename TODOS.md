@@ -98,9 +98,12 @@ structural enforcement (spec validator requires).
 - [x] Orchestrator lifecycle integration with MANDATORY walk-forward for freqai
 - [x] Live shakedown: baseline ran the full lifecycle and was correctly retired
       (`FAIL_UNPROFITABLE`, gates + failure memory + model purge all exercised)
-- [ ] **Phase 3 — LLM-proposed freqai specs**: wire generator/critic to emit
-      `freqai_spec` JSONs (the safe renderer path now exists); start with 1–2
-      specs/week alongside rule candidates
+- [x] **Phase 3a — LLM-proposed freqai specs** (`freqai_generator.py`): batch-first
+      propose/evaluate/report CLI, prompt built from the validator's own constants
+      (anti-drift), ML failure memory + in-batch diversity pressure. Weekly cron
+      hookup exists, off by default (`FREQAI_WEEKLY_COUNT=0`). Live-verified:
+      DeepSeek proposed 2 valid specs first-try; both evaluated through the full
+      lifecycle and retired into failure memory.
 - [ ] **Phase 3 — live deployment of ML strategies**: reconciler support for the
       freqai image, model retraining/freshness ops, low-confidence retirement
       (`stale model`, `low confidence` verdicts)
