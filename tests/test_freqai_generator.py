@@ -82,6 +82,14 @@ def test_system_prompt_contains_every_feature_and_bound():
     assert "ONE JSON object" in prompt
     assert "walk-forward" in prompt.lower()
 
+    # Entry gates: every type + parameter bounds are in the prompt
+    from freqai_spec import DI_THRESHOLD_BOUNDS, EMA_GATE_PERIOD_BOUNDS
+    from indicators.freqai_features import GATE_TYPES
+    for gate in GATE_TYPES:
+        assert gate in prompt, f"gate {gate!r} missing from prompt"
+    assert str(EMA_GATE_PERIOD_BOUNDS[1]) in prompt
+    assert str(DI_THRESHOLD_BOUNDS[1]) in prompt
+
 
 def test_prompt_includes_failures_and_batch_diversity():
     prompt = fg.build_freqai_prompt(

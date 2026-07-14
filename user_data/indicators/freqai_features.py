@@ -135,11 +135,21 @@ EXTERNAL_FEATURES = {
 
 TIME_FEATURES = ("time_cycle",)
 
+# Regime as a model INPUT (issue #47 entry gates work): numeric encoding of
+# the same detector that routes the live instances, so the model can learn
+# state-conditional patterns ("this dip bounces in uptrends, not in crisis").
+# Distinct from the entry GATE below — feature = suggestion the model may
+# learn from; gate = hard constraint it cannot override.
+STATE_FEATURES = ("regime",)
+
+REGIME_ENCODING = {"crisis": -1.0, "ranging": 0.0, "breakout": 1.0, "trending": 2.0}
+
 ALL_FEATURE_KEYS = (
     tuple(EXPAND_FEATURES)
     + tuple(BASIC_FEATURES)
     + tuple(EXTERNAL_FEATURES)
     + TIME_FEATURES
+    + STATE_FEATURES
 )
 
 
@@ -214,7 +224,67 @@ def add_standard_features(dataframe: pd.DataFrame, features: list[str]) -> pd.Da
         dataframe["%-time-week-sin"] = np.sin(2 * np.pi * hour_of_week / 168.0)
         dataframe["%-time-week-cos"] = np.cos(2 * np.pi * hour_of_week / 168.0)
 
+    if "regime" in features:
+        # Computed on a copy — add_regime_detection appends its diagnostic
+        # columns and the feature frame shouldn't inherit them.
+        from .regime_detector import add_regime_detection
+        detected = add_regime_detection(dataframe.copy())
+        dataframe["%-regime"] = _safe_fill(
+            detected["regime"].map(REGIME_ENCODING)
+        )
+
     return dataframe
+
+
+# ---------------------------------------------------------------------------
+# Entry gates (hard market-state preconditions on BUYING — issue #47)
+# ---------------------------------------------------------------------------
+
+# Gate types a spec may select. Unlike features (inputs the model may learn
+# from), a gate is a constraint the model cannot override: when the mask is
+# False, no new entries — the strategy holds cash. Exits are never gated.
+#   none          today's behavior (always allowed)
+#   ema_trend     buy only while close > EMA(period); period is spec-bounded
+#   regime_match  buy only while the regime detector agrees with the
+#                 candidate's TARGET_REGIME ('all' blocks only crisis bars)
+#   di_confidence no strategy-side mask — rendered into the config as
+#                 FreqAI's DI_threshold, so the MODEL declines predictions
+#                 on data unlike its training distribution (do_predict=0,
+#                 which the base entry condition already requires)
+GATE_TYPES = ("none", "ema_trend", "regime_match", "di_confidence")
+
+
+def entry_gate_mask(
+    dataframe: pd.DataFrame,
+    gate_type: str,
+    period: int = 0,
+    target_regime: str = "all",
+) -> pd.Series:
+    """Boolean Series: True where NEW entries are allowed.
+
+    Pure pandas (testable without freqtrade). NaN warm-up rows resolve to
+    False — "can't confirm the market state yet" means "don't buy",
+    never "buy anyway".
+    """
+    if gate_type in ("none", "di_confidence", "", None):
+        # di_confidence acts through the config/do_predict path, not here.
+        return pd.Series(True, index=dataframe.index)
+
+    if gate_type == "ema_trend":
+        import pandas_ta as ta
+        ema = ta.ema(dataframe["close"], length=int(period))
+        if ema is None:
+            return pd.Series(False, index=dataframe.index)
+        return (dataframe["close"] > ema).fillna(False)
+
+    if gate_type == "regime_match":
+        from .regime_detector import add_regime_detection
+        regime = add_regime_detection(dataframe.copy())["regime"]
+        if target_regime == "all":
+            return (regime != "crisis").fillna(False)
+        return (regime == target_regime).fillna(False)
+
+    raise ValueError(f"unknown entry gate type: {gate_type!r}")
 
 
 def add_future_return_target(

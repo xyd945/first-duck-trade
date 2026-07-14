@@ -117,6 +117,65 @@ def test_rejects_positive_stoploss(spec):
     _expect_error(spec, "stoploss")
 
 
+def test_accepts_all_valid_entry_gates(spec):
+    for gate in ({"type": "none"}, {"type": "regime_match"},
+                 {"type": "ema_trend", "period": 200},
+                 {"type": "di_confidence", "di_threshold": 1.5}):
+        spec["entry_gate"] = gate
+        validate_freqai_spec(spec)  # must not raise
+
+
+def test_rejects_unknown_gate_type(spec):
+    spec["entry_gate"] = {"type": "my_custom_gate"}
+    _expect_error(spec, "entry_gate.type")
+
+
+def test_rejects_ema_gate_without_period(spec):
+    spec["entry_gate"] = {"type": "ema_trend"}
+    _expect_error(spec, "entry_gate.period")
+
+
+def test_rejects_out_of_bounds_gate_params(spec):
+    spec["entry_gate"] = {"type": "ema_trend", "period": 5000}
+    _expect_error(spec, "entry_gate.period")
+    spec["entry_gate"] = {"type": "di_confidence", "di_threshold": 99}
+    _expect_error(spec, "di_threshold")
+
+
+def test_rejects_stray_gate_keys(spec):
+    spec["entry_gate"] = {"type": "regime_match", "period": 200}
+    _expect_error(spec, "unexpected keys")
+
+
+def test_rendered_strategy_carries_gate(spec, tmp_path):
+    from validation_pipeline import validate_freqai_strategy_file
+
+    spec["entry_gate"] = {"type": "ema_trend", "period": 168}
+    code = render_freqai_strategy(spec)
+    assert 'ENTRY_GATE_TYPE = "ema_trend"' in code
+    assert "ENTRY_GATE_PERIOD = 168" in code
+    f = tmp_path / f"{spec['name']}.py"
+    f.write_text(code)
+    assert validate_freqai_strategy_file(f).passed
+
+
+def test_rendered_strategy_defaults_gate_to_none(spec):
+    code = render_freqai_strategy(spec)
+    assert 'ENTRY_GATE_TYPE = "none"' in code
+
+
+def test_di_confidence_gate_sets_config_threshold(spec):
+    spec["entry_gate"] = {"type": "di_confidence", "di_threshold": 1.5}
+    config = render_freqai_config(spec)
+    assert config["freqai"]["feature_parameters"]["DI_threshold"] == 1.5
+
+
+def test_non_di_gate_leaves_config_threshold_unset(spec):
+    spec["entry_gate"] = {"type": "regime_match"}
+    config = render_freqai_config(spec)
+    assert "DI_threshold" not in config["freqai"]["feature_parameters"]
+
+
 def test_rejects_hostile_generation_id(spec):
     spec["generation_id"] = 'x"\nimport os\ny = "'
     _expect_error(spec, "generation_id")
@@ -337,6 +396,64 @@ def test_future_return_target_looks_forward(sample_ohlcv):
     i = 10
     expected = df["close"].iloc[i + 24] / df["close"].iloc[i] - 1.0
     assert df["&-future_return"].iloc[i] == pytest.approx(expected)
+
+
+def test_regime_feature_uses_detector_encoding(sample_ohlcv):
+    from indicators.freqai_features import REGIME_ENCODING, add_standard_features
+
+    df = add_standard_features(sample_ohlcv.copy(), ["regime"])
+    assert "%-regime" in df.columns
+    assert set(df["%-regime"].unique()).issubset(set(REGIME_ENCODING.values()))
+
+
+def test_entry_gate_mask_none_allows_everything(sample_ohlcv):
+    from indicators.freqai_features import entry_gate_mask
+
+    mask = entry_gate_mask(sample_ohlcv, "none")
+    assert mask.all()
+    # di_confidence acts through config/do_predict, not the mask
+    assert entry_gate_mask(sample_ohlcv, "di_confidence").all()
+
+
+def test_entry_gate_mask_ema_trend(trending_ohlcv):
+    from indicators.freqai_features import entry_gate_mask
+
+    mask = entry_gate_mask(trending_ohlcv, "ema_trend", period=50)
+    # Warm-up rows can't confirm a trend -> no buying
+    assert not mask.iloc[:10].any()
+    # A strongly rising series ends above its EMA -> buying allowed
+    assert mask.iloc[-20:].all()
+
+
+def test_entry_gate_mask_ema_trend_blocks_downtrend(trending_ohlcv):
+    from indicators.freqai_features import entry_gate_mask
+
+    falling = trending_ohlcv.copy()
+    falling["close"] = falling["close"].iloc[::-1].values
+    mask = entry_gate_mask(falling, "ema_trend", period=50)
+    assert not mask.iloc[-20:].any()
+
+
+def test_entry_gate_mask_regime_match(sample_ohlcv):
+    from indicators.freqai_features import entry_gate_mask
+    from indicators.regime_detector import add_regime_detection
+
+    regimes = add_regime_detection(sample_ohlcv.copy())["regime"]
+    mask = entry_gate_mask(sample_ohlcv, "regime_match",
+                           target_regime="ranging")
+    assert mask.equals((regimes == "ranging").fillna(False))
+
+    # 'all' blocks only crisis bars
+    mask_all = entry_gate_mask(sample_ohlcv, "regime_match",
+                               target_regime="all")
+    assert mask_all.equals((regimes != "crisis").fillna(False))
+
+
+def test_entry_gate_mask_unknown_type_raises(sample_ohlcv):
+    from indicators.freqai_features import entry_gate_mask
+
+    with pytest.raises(ValueError, match="unknown entry gate"):
+        entry_gate_mask(sample_ohlcv, "sneaky_gate")
 
 
 def test_safe_fill_never_backfills():
