@@ -87,6 +87,12 @@ FREQAI_PARAM_BOUNDS = {
 
 VALID_REGIMES = ("trending", "ranging", "breakout", "all")
 
+# Entry gates (issue #47): hard market-state preconditions on buying.
+# Types live in the feature library (indicators/freqai_features.GATE_TYPES);
+# bounds for their parameters live here with the other spec bounds.
+EMA_GATE_PERIOD_BOUNDS = (50, 400)     # hours, on the 1h timeframe
+DI_THRESHOLD_BOUNDS = (0.5, 5.0)       # FreqAI Dissimilarity Index cutoff
+
 REQUIRED_FIELDS = (
     "spec_type", "name", "thesis", "target_regime",
     "features", "target", "model", "thresholds", "risk",
@@ -198,6 +204,30 @@ def validate_freqai_spec(spec: dict) -> None:
                  f"freqai.indicator_periods_candles must be 1-4 ints "
                  f"in {INDICATOR_PERIOD_BOUNDS}")
 
+    # Entry gate: optional; each type has exactly its own params
+    gate = spec.get("entry_gate", {"type": "none"})
+    _require(isinstance(gate, dict), "entry_gate must be an object")
+    from indicators.freqai_features import GATE_TYPES
+    gate_type = gate.get("type")
+    _require(gate_type in GATE_TYPES,
+             f"entry_gate.type must be one of {GATE_TYPES}")
+    allowed_keys = {"type"}
+    if gate_type == "ema_trend":
+        allowed_keys.add("period")
+        p = gate.get("period")
+        _require(isinstance(p, int) and not isinstance(p, bool)
+                 and EMA_GATE_PERIOD_BOUNDS[0] <= p <= EMA_GATE_PERIOD_BOUNDS[1],
+                 f"entry_gate.period must be an int in {EMA_GATE_PERIOD_BOUNDS}")
+    if gate_type == "di_confidence":
+        allowed_keys.add("di_threshold")
+        d = gate.get("di_threshold")
+        _require(isinstance(d, (int, float)) and not isinstance(d, bool)
+                 and DI_THRESHOLD_BOUNDS[0] <= d <= DI_THRESHOLD_BOUNDS[1],
+                 f"entry_gate.di_threshold must be a number in {DI_THRESHOLD_BOUNDS}")
+    stray = set(gate) - allowed_keys
+    _require(not stray, f"entry_gate: unexpected keys {sorted(stray)} "
+             f"for type {gate_type!r}")
+
     # Risk: same contract as rule-based specs
     risk = spec["risk"]
     _require(isinstance(risk, dict), "risk must be an object")
@@ -244,6 +274,8 @@ class {name}(BaseFreqaiStrategy):
 
     ENTRY_THRESHOLD = {entry_threshold}
     EXIT_THRESHOLD = {exit_threshold}
+    ENTRY_GATE_TYPE = "{gate_type}"
+    ENTRY_GATE_PERIOD = {gate_period}
 
     stoploss = {stoploss}
     minimal_roi = {minimal_roi}
@@ -253,7 +285,10 @@ class {name}(BaseFreqaiStrategy):
 def render_freqai_strategy(spec: dict) -> str:
     """Render the declarative strategy subclass. Validates first."""
     validate_freqai_spec(spec)
+    gate = spec.get("entry_gate", {"type": "none"})
     return _TEMPLATE.format(
+        gate_type=gate["type"],
+        gate_period=int(gate.get("period", 0)),
         name=spec["name"],
         thesis=json.dumps(spec["thesis"]),
         target_regime=spec["target_regime"],
@@ -303,6 +338,13 @@ def render_freqai_config(spec: dict, base_config_path: Path | str = None) -> dic
 
     if "test_size" in spec_freqai:
         freqai["data_split_parameters"]["test_size"] = float(spec_freqai["test_size"])
+
+    # di_confidence gate: FreqAI-native — a DI_threshold > 0 makes FreqAI
+    # flag predictions on data unlike the training distribution as
+    # do_predict=0, which the base strategy's entry condition requires.
+    gate = spec.get("entry_gate", {})
+    if gate.get("type") == "di_confidence":
+        fp["DI_threshold"] = float(gate["di_threshold"])
 
     # Model params: start from base defaults, overlay the spec's bounded set.
     freqai["model_training_parameters"].update(spec["model"].get("params", {}))

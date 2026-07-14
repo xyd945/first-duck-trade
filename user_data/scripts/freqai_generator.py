@@ -60,16 +60,18 @@ FEATURE_DESCRIPTIONS = {
     "alt_strength": "ETH/BTC 30d z-score — alt-season regime signal",
     "macro_fgi": "composite Fear & Greed index",
     "macro_vix": "CBOE VIX close — cross-asset risk appetite",
+    "regime": "market regime as model input (crisis=-1, ranging=0, breakout=1, trending=2) — lets the model learn state-conditional patterns",
 }
 
 
 def build_system_prompt() -> str:
     """Assemble the system prompt from the validator's own constants."""
     from freqai_spec import (
-        ENTRY_THRESHOLD_BOUNDS, FREQAI_PARAM_BOUNDS, HORIZON_BOUNDS,
-        INDICATOR_PERIOD_BOUNDS, MIN_FEATURES, MODEL_FAMILIES,
-        MODEL_PARAM_BOUNDS, VALID_REGIMES,
+        DI_THRESHOLD_BOUNDS, EMA_GATE_PERIOD_BOUNDS, ENTRY_THRESHOLD_BOUNDS,
+        FREQAI_PARAM_BOUNDS, HORIZON_BOUNDS, INDICATOR_PERIOD_BOUNDS,
+        MIN_FEATURES, MODEL_FAMILIES, MODEL_PARAM_BOUNDS, VALID_REGIMES,
     )
+    from indicators.freqai_features import GATE_TYPES
 
     features_block = "\n".join(
         f"  {key:14s} {desc}" for key, desc in FEATURE_DESCRIPTIONS.items()
@@ -82,6 +84,10 @@ def build_system_prompt() -> str:
         f"  {name}: {typ.__name__} in [{lo}, {hi}]"
         for name, (typ, lo, hi) in FREQAI_PARAM_BOUNDS.items()
     )
+
+    gate_types = ", ".join(GATE_TYPES)
+    ema_gate_bounds = list(EMA_GATE_PERIOD_BOUNDS)
+    di_bounds = list(DI_THRESHOLD_BOUNDS)
 
     return f"""You are an ML experiment designer for an automated crypto trading factory.
 You propose FreqAI experiment SPECS — structured JSON, never code. A spec
@@ -100,6 +106,7 @@ OUTPUT FORMAT: exactly ONE JSON object. No prose, no markdown fences.
   "target": {{"type": "future_return", "horizon_candles": 24}},
   "model": {{"family": "{MODEL_FAMILIES[0]}", "params": {{"n_estimators": 400, "learning_rate": 0.05}}}},
   "thresholds": {{"entry": 0.005, "exit": 0.0}},
+  "entry_gate": {{"type": "regime_match"}},
   "freqai": {{"train_period_days": 60, "backtest_period_days": 7,
               "include_shifted_candles": 2, "indicator_periods_candles": [14, 50],
               "test_size": 0.25}},
@@ -120,6 +127,23 @@ model.params (all optional):
 {model_params_block}
 freqai block (all optional):
 {freqai_params_block}
+
+ENTRY GATES (optional "entry_gate" field — a HARD precondition on buying
+the model cannot override; when the gate is closed the strategy holds cash;
+exits are never gated). Types: {gate_types}
+  none          always allowed to buy (default)
+  ema_trend     buy only while close > EMA(period); requires
+                "period": int in {ema_gate_bounds}
+  regime_match  buy only while the regime detector agrees with your
+                target_regime ('all' blocks only crisis bars); no params
+  di_confidence the model itself declines predictions on market data
+                unlike its training distribution; requires
+                "di_threshold": number in {di_bounds} (lower = stricter)
+The prior experiment history shows ungated long-only candidates bleeding
+through downtrends via hundreds of small losing entries — a gate (or the
+"regime" feature, or both) is how a spec expresses "when NOT to trade".
+Gates and the regime feature are independent: feature = the model may
+learn from market state; gate = it is forbidden to buy against it.
 
 DESIGN GUIDANCE:
 - Scale thresholds to the horizon: a 24-candle horizon has larger typical
@@ -155,7 +179,8 @@ def _format_freqai_failures(rows: list) -> str:
         if spec:
             shape = (f" features={spec.get('features')} "
                      f"horizon={spec.get('target', {}).get('horizon_candles')} "
-                     f"entry_thr={spec.get('thresholds', {}).get('entry')}")
+                     f"entry_thr={spec.get('thresholds', {}).get('entry')} "
+                     f"gate={spec.get('entry_gate', {}).get('type', 'none')}")
         lines.append(
             f"- {r['name']} [{r.get('failure_verdict', '')}] "
             f"trades={r.get('total_trades')} profit={r.get('profit_total_pct')}% "
@@ -346,17 +371,18 @@ def build_report() -> str:
         return "No freqai experiments in the registry yet."
 
     header = (f"{'name':32s} {'regime':9s} {'hrz':>4s} {'entry':>7s} "
-              f"{'nfeat':>5s} {'trades':>6s} {'profit%':>8s} {'sharpe':>7s} "
-              f"{'status':9s} verdict")
+              f"{'gate':13s} {'nfeat':>5s} {'trades':>6s} {'profit%':>8s} "
+              f"{'sharpe':>7s} {'status':9s} verdict")
     lines = [header, "-" * len(header)]
     for r in rows:
         spec = load_spec_sidecar(r.get("filepath", "")) or {}
         horizon = spec.get("target", {}).get("horizon_candles", "?")
         entry = spec.get("thresholds", {}).get("entry", "?")
+        gate = spec.get("entry_gate", {}).get("type", "none")
         nfeat = len(spec.get("features", []) or [])
         lines.append(
             f"{r['name'][:32]:32s} {r['target_regime']:9s} {horizon!s:>4s} "
-            f"{entry!s:>7s} {nfeat:>5d} {r['total_trades']:>6d} "
+            f"{entry!s:>7s} {gate:13s} {nfeat:>5d} {r['total_trades']:>6d} "
             f"{r['profit_total_pct']:>8.2f} {r['sharpe']:>7.2f} "
             f"{r['status']:9s} {r.get('failure_verdict') or '-'}"
         )

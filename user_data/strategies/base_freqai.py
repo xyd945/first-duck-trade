@@ -32,6 +32,7 @@ from indicators.freqai_features import (
     add_expand_features,
     add_future_return_target,
     add_standard_features,
+    entry_gate_mask,
 )
 
 TARGET_COLUMN = "&-future_return"
@@ -60,6 +61,15 @@ class BaseFreqaiStrategy(IStrategy):
     ]
     ENTRY_THRESHOLD: float = 0.005   # predicted fwd return to enter long
     EXIT_THRESHOLD: float = 0.0      # predicted fwd return to exit
+
+    # Market-state entry gate (issue #47): a hard precondition on BUYING
+    # the model cannot override. "none" = today's behavior. "ema_trend"
+    # uses ENTRY_GATE_PERIOD; "regime_match" uses TARGET_REGIME;
+    # "di_confidence" acts through the rendered config's DI_threshold
+    # (surfaces as do_predict=0, already required below). Exits are
+    # never gated — a gate closing does not force-sell open positions.
+    ENTRY_GATE_TYPE: str = "none"
+    ENTRY_GATE_PERIOD: int = 0
 
     # --- Safe defaults (subclass CAN override within spec bounds) ---
     minimal_roi = {"0": 0.15, "60": 0.08, "120": 0.04, "240": 0.02}
@@ -111,9 +121,15 @@ class BaseFreqaiStrategy(IStrategy):
         return self.freqai.start(dataframe, metadata, self)
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        gate = entry_gate_mask(
+            dataframe, self.ENTRY_GATE_TYPE,
+            period=self.ENTRY_GATE_PERIOD,
+            target_regime=self.TARGET_REGIME,
+        )
         dataframe.loc[
             (dataframe["do_predict"] == 1)
-            & (dataframe[TARGET_COLUMN] > self.ENTRY_THRESHOLD),
+            & (dataframe[TARGET_COLUMN] > self.ENTRY_THRESHOLD)
+            & gate,
             "enter_long",
         ] = 1
         return dataframe
