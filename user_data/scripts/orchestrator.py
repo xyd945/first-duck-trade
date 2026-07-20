@@ -912,6 +912,21 @@ def job_generate_strategies():
         log.error(f"Strategy generation failed: {e}", exc_info=True)
 
 
+def _parse_freqai_backtest_end(raw: str):
+    """Parse the FREQAI_BACKTEST_END research override. Strict YYYYMMDD —
+    strptime alone would happily read '2025111' as 2025-11-01 and silently
+    anchor the evaluation to the wrong window (codex review of PR #52).
+    Returns an aware UTC datetime, or None when unset."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    import re
+    if not re.fullmatch(r"\d{8}", raw):
+        raise ValueError(
+            f"FREQAI_BACKTEST_END must be YYYYMMDD, got {raw!r}")
+    return datetime.strptime(raw, "%Y%m%d").replace(tzinfo=timezone.utc)
+
+
 def _find_btc_data_file() -> Path | None:
     """Best-effort lookup of a BTC OHLCV feather file for buyhold + regime."""
     candidates = [
@@ -975,17 +990,41 @@ def job_backtest_candidates(only_name: str | None = None):
             log.info("No candidates to backtest.")
             return
 
+        # Research knob (issue #47 positive-control experiments): anchor the
+        # FreqAI evaluation window to a historical end date instead of now.
+        # YYYYMMDD; empty = production behavior. Applies to the freqai full
+        # backtest, its walk-forward windows, and the regime-fraction window
+        # so every gate judges the SAME market the backtest saw. Leave unset
+        # in production — the scheduled weekly job never sets it.
+        freqai_end = _parse_freqai_backtest_end(
+            os.environ.get("FREQAI_BACKTEST_END", ""))
+        if freqai_end:
+            log.info(f"  FREQAI_BACKTEST_END override active: "
+                     f"{freqai_end:%Y%m%d}")
+
         # R7: precompute reference data once per job run (shared across all
         # candidates), not once per candidate. BTC feather + regime fractions
         # only depend on the lookback window, not the strategy.
+        # With the research override, freqai candidates get fractions
+        # anchored to the historical window while rule candidates keep the
+        # live window — a rule candidate's backtest always runs against
+        # recent data, so judging it by the control window's regimes would
+        # be wrong (codex review of PR #52).
         btc_path = _find_btc_data_file()
         regime_fractions = None
+        freqai_regime_fractions = None
         if btc_path:
             try:
                 import pandas as pd
                 btc_df = pd.read_feather(btc_path)
-                regime_fractions = compute_regime_fractions(btc_df, lookback_days=180)
+                regime_fractions = compute_regime_fractions(
+                    btc_df, lookback_days=180)
                 log.info(f"  Regime fractions (180d): {regime_fractions}")
+                if freqai_end:
+                    freqai_regime_fractions = compute_regime_fractions(
+                        btc_df, lookback_days=180, end_date=freqai_end)
+                    log.info(f"  Regime fractions (anchored "
+                             f"{freqai_end:%Y%m%d}): {freqai_regime_fractions}")
             except Exception as e:
                 log.warning(f"  Regime fraction computation failed: {e}")
 
@@ -1053,7 +1092,7 @@ def job_backtest_candidates(only_name: str | None = None):
                     # FreqAI requires an explicit timerange — mirror the
                     # 6-month window run_backtest defaults to for rule
                     # candidates when given all available data.
-                    bt_end = datetime.now(timezone.utc)
+                    bt_end = freqai_end or datetime.now(timezone.utc)
                     bt_start = bt_end - timedelta(days=180)
                     result = run_backtest(
                         strategy_name=name,
@@ -1118,9 +1157,17 @@ def job_backtest_candidates(only_name: str | None = None):
                 ).lower() not in ("0", "false", "no")
                 gate_verdicts = []
 
-                if regime_fractions is not None:
+                # Anchored fractions apply ONLY to freqai candidates under
+                # the research override — rule candidates' backtests always
+                # cover recent data, so they keep the live-window fractions.
+                cand_fractions = (
+                    freqai_regime_fractions
+                    if (is_freqai and freqai_regime_fractions is not None)
+                    else regime_fractions
+                )
+                if cand_fractions is not None:
                     v = gate_regime_conditional_floor(
-                        result, target_regime, regime_fractions, base_min_trades=20,
+                        result, target_regime, cand_fractions, base_min_trades=20,
                     )
                 else:
                     v = _skip("SKIP_REGIME", "regime_fractions not available — "
@@ -1160,6 +1207,7 @@ def job_backtest_candidates(only_name: str | None = None):
                             **(freqai_kwargs or {"timeout_seconds": 600}),
                         ),
                         n_splits=wf_splits, days_per_split=wf_days,
+                        end_date=freqai_end if is_freqai else None,
                     )
                     v = gate_walk_forward(wf_results)
                 elif is_freqai:

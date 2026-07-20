@@ -134,9 +134,11 @@ def test_orchestrator_appends_skip_verdict_for_missing_regime_data():
     """When regime_fractions is None the gate must still append a verdict
     (not silently omit). Source-level check that the else: branch exists."""
     src = (ROOT / "user_data" / "scripts" / "orchestrator.py").read_text()
-    # The pattern we're guarding: "if regime_fractions is not None: <run>
-    # else: <append _skip>". Both halves must be present.
-    assert "if regime_fractions is not None:" in src
+    # The pattern we're guarding: "if <fractions> is not None: <run>
+    # else: <append _skip>". Both halves must be present. (PR #52 renamed
+    # the per-candidate variable to cand_fractions so freqai research runs
+    # can use anchored fractions without leaking them to rule candidates.)
+    assert "if cand_fractions is not None:" in src
     assert 'SKIP_REGIME' in src
 
 
