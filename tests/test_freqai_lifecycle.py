@@ -328,6 +328,34 @@ def test_run_walk_forward_permanent_crash_still_fails():
     assert gate_walk_forward(results)["verdict"] == "FAIL_WF_CRASH"
 
 
+def test_regime_fractions_anchor_to_end_date(sample_ohlcv):
+    """Positive-control research runs (FREQAI_BACKTEST_END) must compute
+    regime fractions over the HISTORICAL window, not the last 180 days
+    from now — otherwise the regime floor judges a different market than
+    the backtest saw."""
+    from datetime import datetime, timezone
+    from pipeline_gates import compute_regime_fractions
+
+    # sample fixture dates start 2025-01-01; anchor inside that range
+    anchor = datetime(2025, 1, 5, tzinfo=timezone.utc)
+    fracs = compute_regime_fractions(sample_ohlcv, lookback_days=4,
+                                     end_date=anchor)
+    assert abs(sum(fracs.values()) - 1.0) < 1e-6
+    # Unanchored, the 2025 fixture is entirely outside now-180d: the
+    # function falls back to uniform priors — proving the anchor matters.
+    unanchored = compute_regime_fractions(sample_ohlcv, lookback_days=4)
+    assert unanchored == {"trending": 0.25, "ranging": 0.25,
+                          "breakout": 0.25, "crisis": 0.25}
+
+
+def test_orchestrator_wires_freqai_end_override():
+    src = _orchestrator_source()
+    assert 'os.environ.get("FREQAI_BACKTEST_END", "")' in src
+    assert "bt_end = freqai_end or datetime.now(timezone.utc)" in src
+    assert "end_date=freqai_end if is_freqai else None" in src
+    assert "end_date=freqai_end" in src.split("compute_regime_fractions(")[1][:120]
+
+
 def test_gate_walk_forward_skip_is_not_strict_pass():
     """The property the mandatory-WF rule relies on: a WF skip fails
     is_strict_pass while a real pass clears it."""
