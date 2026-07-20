@@ -101,7 +101,13 @@ def compute_regime_fractions(
         df["date"] = pd.to_datetime(df["date"], utc=True)
         anchor = end_date or datetime.now(timezone.utc)
         cutoff = anchor - timedelta(days=lookback_days)
-        df = df[(df["date"] >= cutoff) & (df["date"] <= anchor)]
+        df = df[df["date"] >= cutoff]
+        # Upper bound only for explicit historical anchors — the default
+        # path must stay byte-identical to the pre-end_date behavior
+        # (an unconditional <= now would silently drop any future-stamped
+        # rows a data source might ever produce).
+        if end_date is not None:
+            df = df[df["date"] <= end_date]
     if len(df) < 60:
         # Not enough candles to classify — return uniform priors so the
         # floor adjustment is a no-op.

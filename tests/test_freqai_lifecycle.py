@@ -353,7 +353,55 @@ def test_orchestrator_wires_freqai_end_override():
     assert 'os.environ.get("FREQAI_BACKTEST_END", "")' in src
     assert "bt_end = freqai_end or datetime.now(timezone.utc)" in src
     assert "end_date=freqai_end if is_freqai else None" in src
-    assert "end_date=freqai_end" in src.split("compute_regime_fractions(")[1][:120]
+
+
+def test_freqai_end_fractions_never_leak_to_rule_candidates():
+    """Codex finding on PR #52: with the override set, rule candidates in a
+    mixed batch must keep live-window regime fractions — their backtests
+    always cover recent data. Anchored fractions apply to freqai only."""
+    src = _orchestrator_source()
+    assert "freqai_regime_fractions" in src
+    assert ("if (is_freqai and freqai_regime_fractions is not None)" in src)
+    # Live fractions are computed WITHOUT the anchor
+    live_call = src.split("regime_fractions = compute_regime_fractions(")[1][:60]
+    assert "end_date" not in live_call
+
+
+def test_parse_freqai_backtest_end_strict():
+    """strptime alone accepts '2025111' as 2025-11-01 — the helper must
+    reject anything that isn't exactly YYYYMMDD."""
+    from datetime import timezone as tz
+    import orchestrator
+
+    parsed = orchestrator._parse_freqai_backtest_end("20251020")
+    assert parsed.tzinfo == tz.utc
+    assert (parsed.year, parsed.month, parsed.day) == (2025, 10, 20)
+    assert orchestrator._parse_freqai_backtest_end("") is None
+    assert orchestrator._parse_freqai_backtest_end("  ") is None
+    for bad in ("2025111", "2025-10-20", "202510200", "yesterday"):
+        with pytest.raises(ValueError):
+            orchestrator._parse_freqai_backtest_end(bad)
+
+
+def test_regime_fractions_default_path_keeps_future_rows(sample_ohlcv):
+    """Codex finding on PR #52: without an explicit end_date the function
+    must NOT apply an upper date bound — production behavior stays
+    byte-identical to the pre-end_date code."""
+    import pandas as pd
+    from pipeline_gates import compute_regime_fractions
+
+    df = sample_ohlcv.copy()
+    # Re-stamp the fixture into a window straddling now: half past, half future
+    n = len(df)
+    df["date"] = pd.date_range(
+        pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=n // 2),
+        periods=n, freq="1h",
+    )
+    fracs = compute_regime_fractions(df, lookback_days=30)
+    # All rows (incl. future-stamped) survive the filter -> enough candles
+    # to classify -> NOT the uniform-prior fallback
+    assert fracs != {"trending": 0.25, "ranging": 0.25,
+                     "breakout": 0.25, "crisis": 0.25}
 
 
 def test_gate_walk_forward_skip_is_not_strict_pass():
