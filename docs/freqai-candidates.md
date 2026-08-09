@@ -164,7 +164,7 @@ evaluation window to a historical end date: the 180-day full backtest, its
 mandatory walk-forward windows, and the regime-fraction window all end there,
 so every gate judges the same market the backtest saw. Purpose: discriminate
 "the factory can't find edge" from "this window has no long edge" by pointing
-the same search at a rising window (e.g. Apr–Oct 2025, BTC +62%). Run it via:
+the same search at a rising window (e.g. Apr–Oct 2025, BTC ≈ +16%). Run it via:
 
 ```bash
 docker exec -e FREQAI_BACKTEST_END=20251020 ft-orchestrator \
