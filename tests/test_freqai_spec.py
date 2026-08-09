@@ -491,6 +491,11 @@ def test_expand_features_raise_loudly_on_short_input(sample_ohlcv):
     tiny = sample_ohlcv.head(5).copy()
     with pytest.raises(ValueError, match="returned no data"):
         add_expand_features(tiny, ["adx"], 50)
+    # ema_dist does arithmetic on the pandas_ta result — must bail to the
+    # same loud error, not a bare float-minus-None TypeError (seen live in
+    # a data-head walk-forward window during the positive-control runs)
+    with pytest.raises(ValueError, match="returned no data"):
+        add_expand_features(tiny, ["ema_dist"], 50)
 
 
 def test_rendered_generation_id_is_json_escaped(spec):

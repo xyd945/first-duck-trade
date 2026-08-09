@@ -58,6 +58,11 @@ def _f_rsi(df: pd.DataFrame, period: int) -> pd.Series:
 def _f_ema_dist(df: pd.DataFrame, period: int) -> pd.Series:
     import pandas_ta as ta
     ema = ta.ema(df["close"], length=period)
+    # None on too-short input (data-head training slices) — bail before
+    # the arithmetic so _computed raises its loud error instead of a
+    # bare 'float - NoneType' TypeError deep in pandas.
+    if ema is None:
+        return None
     return (df["close"] - ema) / ema
 
 

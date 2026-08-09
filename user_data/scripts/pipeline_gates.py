@@ -71,12 +71,19 @@ def is_strict_pass(verdict: dict) -> bool:
 # Regime-conditional floor
 # ---------------------------------------------------------------------------
 
-def compute_regime_fractions(btc_df, lookback_days: int) -> dict[str, float]:
+def compute_regime_fractions(
+    btc_df, lookback_days: int, end_date: datetime = None
+) -> dict[str, float]:
     """Compute the fraction of the lookback window spent in each regime.
 
     Runs `add_regime_detection` over the BTC candles, then aggregates
     `regime` per-bar to fractions. Returns a dict with keys
     trending/ranging/breakout/crisis (zeros for regimes that never fired).
+
+    `end_date` anchors the lookback window (default: now). Research runs
+    that evaluate candidates against a historical window (issue #47
+    positive-control experiments) pass the window's end so the regime
+    floor reflects the SAME market the backtest saw, not today's.
     """
     import pandas as pd
 
@@ -92,8 +99,15 @@ def compute_regime_fractions(btc_df, lookback_days: int) -> dict[str, float]:
     df = btc_df.copy()
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], utc=True)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        anchor = end_date or datetime.now(timezone.utc)
+        cutoff = anchor - timedelta(days=lookback_days)
         df = df[df["date"] >= cutoff]
+        # Upper bound only for explicit historical anchors — the default
+        # path must stay byte-identical to the pre-end_date behavior
+        # (an unconditional <= now would silently drop any future-stamped
+        # rows a data source might ever produce).
+        if end_date is not None:
+            df = df[df["date"] <= end_date]
     if len(df) < 60:
         # Not enough candles to classify — return uniform priors so the
         # floor adjustment is a no-op.
