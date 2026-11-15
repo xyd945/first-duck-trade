@@ -316,6 +316,67 @@ def test_wallet_refresh_finishes_after_tick_acquisition_time(paper_bot, tmp_path
         clock.current += pd.Timedelta(milliseconds=1)
         return original(*a, **kw)
     monkeypatch.setattr(bot.wallets, "update", delayed)
-    batch = PaperAdapter(bot, tmp_path / "journal.sqlite").step(rows(bot, {"BTC/USDT": .1}), quotes(bot, now), now)
+    adapter = PaperAdapter(bot, tmp_path / "journal.sqlite")
+    batch = adapter.step(rows(bot, {"BTC/USDT": .1}), quotes(bot, now), now)
     assert batch["holdings"]["BTC/USDT"] > 0
     assert batch["risk_scale"] == 1.
+    assert batch.get("finished_at") == clock.current.isoformat()
+    assert pd.Timestamp(batch["finished_at"]) > pd.Timestamp(now)
+    assert adapter.get("batch", batch["time"]) == batch
+    clock.current += pd.Timedelta(minutes=1)
+    restarted = PaperAdapter(bot, tmp_path / "journal.sqlite")
+    assert restarted.step(rows(bot, {"BTC/USDT": .1}), quotes(bot, clock.current), clock.current) == batch
+
+
+@pytest.mark.parametrize("bad", ["wallet", "sql", "fee", "position", "peak", "stale", "capital", "audit"])
+def test_manual_reconciliation_refuses_bad_evidence_without_state_changes(paper_bot, tmp_path, clock, monkeypatch, bad):
+    import sqlite3
+    from h1_paper import PaperAdapter
+    from tests.test_h1_recovery import records
+    bot, now = paper_bot, clock.current
+    adapter = PaperAdapter(bot, tmp_path / "journal.sqlite")
+    adapter.observe(quotes(bot, now), now)
+    enter(bot, "BTC/USDT", 20., now)
+    previous = adapter.get("risk", "current")
+    previous.update(kill_switch_active=True, allow_new_exposure=False)
+    prices = quotes(bot, now)
+    trade = Trade.get_open_trades()[0]
+    if bad == "wallet":
+        total = bot.wallets.get_total
+        monkeypatch.setattr(bot.wallets, "get_total", lambda currency: total(currency) + (1 if currency == "USDT" else 0))
+    elif bad == "sql":
+        trade.amount += 1
+    elif bad == "fee":
+        trade.fee_open = .003
+    elif bad == "position":
+        trade.leverage = 2
+    elif bad == "peak":
+        previous["peak_equity"] = 270000.
+    elif bad == "stale":
+        prices["BTC/USDT"]["asof"] = (now - pd.Timedelta(seconds=301)).isoformat()
+    elif bad == "capital":
+        previous["capital"] = 100000.
+    else:
+        with sqlite3.connect(adapter.journal) as conn:
+            conn.execute("CREATE TRIGGER refuse_audit BEFORE INSERT ON paper_records WHEN NEW.kind='reconcile' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END")
+    Trade.commit()
+    adapter.save("risk", "current", previous)
+    before = records(tmp_path)
+    with pytest.raises((ValueError, sqlite3.IntegrityError)):
+        adapter.reset_risk(prices, now, "Investigated discrepancy")
+    assert records(tmp_path) == before
+
+
+def test_manual_reconciliation_preserves_same_day_loss_halt(paper_bot, tmp_path, clock):
+    from h1_paper import PaperAdapter
+    adapter = PaperAdapter(paper_bot, tmp_path / "journal.sqlite")
+    now = clock.current
+    adapter.observe(quotes(paper_bot, now), now)
+    previous = adapter.get("risk", "current")
+    previous.update(peak_equity=252000., day_start_equity=252000., daily_halt=True, kill_switch_active=True)
+    adapter.save("risk", "current", previous)
+    receipt = adapter.reset_risk(quotes(paper_bot, now), now, "Restored fresh marks")
+    assert not receipt["new"]["kill_switch_active"]
+    assert receipt["new"]["daily_halt"]
+    assert not receipt["new"]["allow_new_exposure"]
+    assert receipt["new"]["peak_equity"] == receipt["new"]["day_start_equity"] == 252000.

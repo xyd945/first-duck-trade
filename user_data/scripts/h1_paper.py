@@ -3,6 +3,7 @@ from datetime import timezone
 import math
 import json
 import sqlite3
+import uuid
 
 import pandas as pd
 from freqtrade.enums import ExitType, ExitCheckTuple
@@ -113,9 +114,51 @@ class PaperAdapter:
         except (ValueError, KeyError, TypeError) as exc:
             state = paper_risk.evaluate(None, state, ["h1"], now)
             state["reason"] = f"Reconciliation rejected: {exc}"
+        if state["kill_switch_active"]:
+            day = pd.Timestamp(now).floor("D").isoformat()
+            with sqlite3.connect(self.journal) as conn:
+                conn.execute("INSERT OR IGNORE INTO paper_records VALUES ('latch',?,?)",
+                             (day, json.dumps(dict(time=day, observed=now.isoformat(), risk=state), allow_nan=False)))
         self.save("risk", "current", state)
         self.save("snapshot", "current", snapshot)
         return snapshot, state
+
+    def reset_risk(self, prices, now, reason):
+        """Reset only from reconciled SQL and wallet values; retain the loss anchors."""
+        previous = self.get("risk", "current")
+        if not reason.strip() or not isinstance(previous, dict):
+            raise ValueError("Reconciliation requires a reason and existing risk state")
+        self.bot.wallets.update()
+        now = max(now, self.bot.wallets._last_wallet_refresh)
+        snapshot = reconcile(self.bot, prices, now)
+        marked = paper_risk.mark_account(snapshot, ["h1"], now)
+        capital = self.bot.config["research_h1"]["designated_portfolio_notional"]
+        if previous.get("capital", capital) != capital:
+            raise ValueError("Reconciliation cannot change designated capital")
+        equity = marked["equity"]
+        day = now.astimezone(timezone.utc).date().isoformat()
+        opening = previous.get("day_start_equity", equity) if previous.get("day") == day else previous.get("last_equity", equity)
+        peak = max(capital, equity, number(opening, "daily opening", positive=True),
+                   number(previous.get("peak_equity", capital), "previous peak", positive=True))
+        seed = dict(capital=capital, peak_equity=peak, last_equity=equity, day_start_equity=opening,
+                    day=day, asof=now.isoformat(), kill_switch_active=False,
+                    daily_halt=previous.get("daily_halt", False) if previous.get("day") == day else False)
+        state = paper_risk.evaluate(snapshot, seed, ["h1"], now)
+        if state["kill_switch_active"]:
+            raise ValueError(f"Reconciliation still requires a kill: {state['reason']}")
+        receipt = dict(time=pd.Timestamp(now).floor("D").isoformat(), observed=now.isoformat(),
+                       reason=reason.strip(), previous=previous, new=state)
+        with sqlite3.connect(self.journal) as conn:
+            conn.execute("INSERT INTO paper_records VALUES ('reconcile',?,?)",
+                         (uuid.uuid4().hex, json.dumps(receipt, allow_nan=False)))
+            if previous.get("kill_switch_active"):
+                day = pd.Timestamp(previous.get("asof", now)).floor("D").isoformat()
+                conn.execute("INSERT OR IGNORE INTO paper_records VALUES ('latch',?,?)",
+                             (day, json.dumps(dict(time=day, observed=now.isoformat(), risk=previous), allow_nan=False)))
+            for kind, value in (("risk", state), ("snapshot", snapshot)):
+                conn.execute("INSERT OR REPLACE INTO paper_records VALUES (?, 'current', ?)",
+                             (kind, json.dumps(value, allow_nan=False)))
+        return receipt
 
     def settle(self):
         for trade in Trade.get_open_trades():
@@ -220,6 +263,8 @@ class PaperAdapter:
                          unfilled={p: q - holdings.get(p, 0.) for p, q in batch["targets"].items()},
                          filled_weights={p: holdings.get(p, 0.) * rows[p]["close"] / batch["equity"] for p in rows},
                          status="waiting" if account["pending"] else "finished")
+            if batch["status"] == "finished":
+                batch["finished_at"] = state["asof"]
             batch["divergence"] = any(abs(q) > 1e-8 for q in batch["unfilled"].values())
         else:
             batch.update(status="waiting", risk_reason=state["reason"], divergence=True)
