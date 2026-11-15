@@ -19,6 +19,10 @@ def legacy_opt_in(request, monkeypatch):
         monkeypatch.setenv("ENABLE_STRATEGY_CRITIC", "true")
     if request.path.name == "test_hyperopt.py":
         monkeypatch.setenv("ENABLE_HYPEROPT_RESCUE", "true")
+    if request.path.name in {"test_deployment_manager.py", "test_phase3_reconciler_acting.py"}:
+        # Retained Docker behaviour is tested only against mocks; production remains locked.
+        import paper_risk
+        monkeypatch.setattr(paper_risk, "EXECUTION_ENABLED", True)
 
 
 @pytest.fixture

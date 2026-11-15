@@ -4,7 +4,7 @@ A crypto strategy research harness built on [Freqtrade](https://github.com/freqt
 
 ## Research-first quick start
 
-Do not start the full Compose stack, the orchestrator or trading services for research setup. No exchange keys, demo orders or live orders are required. The pause flags do **not** disable every legacy trading job; they are not permission to run that stack.
+Do not start the full Compose stack, the orchestrator or trading services for research setup. No exchange keys, demo orders or live orders are required. Managed REST/container starts and forced exits are hard-disabled during this phase; manually launching a trading service bypasses those Python guards.
 
 1. Create an isolated Python 3.12 environment and install `docker/requirements-orchestrator.txt` there.
 2. Run the tests without starting a scheduler:
@@ -27,7 +27,7 @@ Do not start the full Compose stack, the orchestrator or trading services for re
 
 See [the research harness contract and commands](docs/research-harness.md) for snapshot creation, the one-use evaluation lock, split artefacts, exact hash formats and the shared ledger.
 
-**Accounting boundary:** this change supplies continuous-path wallet/trade slices, not the net-return accounting scheduled for fix 4. `net_return`, `net_sharpe` and `max_drawdown` stay NULL until that accounting exists. Whole-path engine metrics are labelled separately. Do not use legacy promotion gates as H1 G1 evidence.
+**Accounting boundary:** fixed-capital marked equity, explicit fee/spread/slippage stress and split `net_return`, `net_sharpe` and `max_drawdown` now feed the ledger. Whole-path engine metrics remain labelled separately; synthetic terminal exits do not create fills or fees. The paper gate enforces all-instance equity limits and fails closed on missing/stale inputs. See `docs/cost-risk-accounting.md` for input contracts and limitations. Do not use legacy promotion gates as H1 G1 evidence.
 
 ## Legacy architecture and factory (paused)
 

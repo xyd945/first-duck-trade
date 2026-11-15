@@ -335,11 +335,12 @@ def start_trial(descriptor, split, kind, timerange, git_sha, epochs=0, search=No
 def finish_trial(trial_id, result, verdict="ok"):
     if verdict not in ("ok", "baseline", "sensitivity", "rerun", "invalid", "error"):
         raise ValueError("Invalid run verdict")
-    # Engine metrics remain labelled until fix 4 supplies cost-adjusted metrics.
+    # Keep whole-path engine output separate from independently marked net metrics.
     notes = {key: result[key] for key in (
         "error", "profit_total_pct", "sharpe", "max_drawdown_pct", "params",
         "best_epoch", "total_epochs", "trades_export_path", "params_path", "path_timerange",
-        "path_metrics", "slice_path") if key in result}
+        "path_metrics", "slice_path", "equity_path", "net_path_metrics", "opening_equity",
+        "ending_equity", "cost_total", "cost_model") if key in result}
     notes["state"] = "finished"
     with ledger() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -447,6 +448,12 @@ def describe_run(base, policy, strategy, timeframe, config_path=None, freqai_mod
     if len(matches) != 1:
         raise ValueError("Strategy class must occur once in strategies/candidates")
     params = policy["params"]
+    from accounting import cost_rate
+    costs = policy.get("costs", {})
+    rate = cost_rate(costs)
+    if abs(rate - params.get("cost_rate", -1)) > 1e-12 or engine_config.get("fee") != params["cost_rate"]:
+        raise ValueError("Engine fee and cost_rate must equal the explicit cost model")
+    engine_config["research_costs"] = costs.copy()
     if policy["hypothesis"] == "H1":
         if set(params) != {"ladder", "sigma_target", "vol_window", "rebalance_band", "cost_rate"}:
             raise ValueError("H1 params must contain exactly the four G0 fields and cost_rate")
@@ -552,12 +559,28 @@ def slice_result(result, strategy, timerange, path_timerange, run_dir):
                                  "trades": trades, "opening_wallet": opening.to_dict("records")},
                                 default=str, sort_keys=True))
     sliced.reset_index(drop=True).to_feather(target.with_suffix(".feather"))
-    # Cost/risk accounting belongs to fix 4; never label full-path metrics as split evidence.
+    # Wallet captures are pre-bar and defer open-entry fees, not daily closing NAV.
+    from accounting import cost_rate, equity_curve, freqtrade_fills, metrics, reconcile_wallet
+    config = json.loads((run_dir / "config.json").read_text())
+    initial = config["dry_run_wallet"]
+    fills = freqtrade_fills(summary["trades"], right - timedelta(days=1))
+    marks = pd.DataFrame(index=pd.date_range(left, right - timedelta(days=1), freq="D"))
+    for pair in config["exchange"]["pair_whitelist"]:
+        frame = pd.read_feather(run_dir / "data" / f"{pair.replace('/', '_')}-1d.feather")
+        marks[pair] = frame.set_index("date")["close"].reindex(marks.index)
+    curve = equity_curve(initial, fills, marks, cost_rate=cost_rate(config["research_costs"]))
+    reconcile_wallet(wallet, fills, config["exchange"]["pair_whitelist"], left, right)
+    equity_path = run_dir / "net-equity.feather"
+    curve.reset_index(names="date").to_feather(equity_path)
     keys = ("total_trades", "profit_total_pct", "profit_total_abs", "profit_avg_pct", "max_drawdown_pct",
             "max_drawdown_abs", "sharpe", "sortino", "profit_factor", "win_rate", "avg_duration",
             "backtest_days", "starting_balance")
     result["path_metrics"] = {key: result.pop(key) for key in keys if key in result}
-    result.update(slice_path=str(target), path_timerange=path_timerange)
+    result.update(metrics(curve, initial, start))
+    result.update(slice_path=str(target), path_timerange=path_timerange,
+                  equity_path=str(equity_path), net_path_metrics=metrics(curve, initial, left),
+                  cost_model=config["research_costs"],
+                  total_trades=sum(start <= f["date"] < end for f in fills))
     return result
 
 

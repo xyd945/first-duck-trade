@@ -1,6 +1,6 @@
 # Frozen research harness
 
-This is the fix-2 research boundary, not a trading system or a G1 verdict. H1's strategy and baselines are separate work. Cost/risk accounting is fix 4. No real data, API keys, strategy performance or account access is included in these fixtures.
+This is the fix-2 research boundary with fix-4 net accounting, not a trading system or a G1 verdict. H1's strategy and baselines are separate work. No real data, API keys, strategy performance or account access is included in these fixtures. See `docs/cost-risk-accounting.md` for the accounting and paper-risk contracts.
 
 ## Pause and environment
 
@@ -10,7 +10,7 @@ Python and Compose default these flags to false:
 - `ENABLE_STRATEGY_CRITIC`: the direct critic entry point returns `SKIP` without an LLM call.
 - `ENABLE_HYPEROPT_RESCUE`: scheduled and manual hyperopt search.
 
-The flags do not disable every legacy orchestrator/trading job. Do not start the full Compose stack, orchestrator or trading containers. Enabling a flag is not approval to restart the factory. The old promotion/status and causality defects are separate fixes.
+Fix 4 additionally hard-disables managed REST starts, forced liquidation and dynamic deployment starts through `paper_risk.EXECUTION_ENABLED = False`. Environment flags cannot turn this on. Do not start the full Compose stack, orchestrator or trading containers; manually launching Freqtrade bypasses these Python guards. Enabling a factory flag is not approval to restart execution. The old promotion/status and causality defects are separate fixes.
 
 Research runs require:
 
@@ -72,7 +72,7 @@ Pin the S2 hash in the same manner. The freezer refuses a cutoff until the final
 
 H1 `params` contains `ladder`, `sigma_target`, `vol_window`, `rebalance_band` and `cost_rate`. `config_hash` is SHA-256 of the exact strategy source bytes immediately followed by UTF-8 JSON of the first four fields, with sorted keys and separators `(',', ':')`. `cost_rate` is recorded but excluded from this statistical hash. Dates, snapshot hashes and execution fingerprints are not silently folded into G0 N.
 
-H1 engine configuration must use OKX spot, daily bars, the four static pairs, `dry_run: true`, and `fee` equal to `cost_rate`. Exchange credentials and config includes are rejected. H1 rejects a hidden strategy parameter sidecar. The staged engine config exposes the registered values at `self.config['research_params']`; the later hand-written H1 strategy must consume those values. Tests do not claim that an arbitrary strategy obeys them.
+H1 engine configuration must use OKX spot, daily bars, the four static pairs, `dry_run: true`, numeric `dry_run_wallet`, and `fee` equal to `cost_rate`. The policy must declare `costs.fee_rate`, `spread_rate`, `slippage_rate` and `stress_multiplier`; their combined one-side rate must equal `cost_rate`. The full quoted spread contributes half per side. The example uses taker fees plus five basis points slippage, doubled. The frozen engine config includes `research_costs`. Exchange credentials and config includes are rejected. H1 rejects a hidden strategy parameter sidecar. The staged engine config exposes the registered values at `self.config['research_params']`; the later hand-written H1 strategy must consume those values. Tests do not claim that an arbitrary strategy obeys them.
 
 A separate registration fingerprint binds the effective engine config, source/helper/sidecar hashes, split policy, S1 hash and declared run kind. All needed strategies/helpers must exist before registration. S2 is intentionally not required then because it does not exist yet. Register base/gate/Bybit-cost sensitivity variants before locking selection; their differing execution fingerprints do not inflate G0's strategy/parameter `config_hash`.
 
@@ -115,7 +115,9 @@ The run directory under `user_data/research_runs/TRIAL_ID/` contains frozen code
 
 `split.json` retains trades intersecting the scoring window, including positions opened before it, plus the last pre-window wallet state. `split.feather` retains the window's wallet records without reinitialising balances. The original full-path archive remains available for G1's full-path matrix. Missing wallet exports, shortened engine dates and incomplete ending coverage fail the run rather than falling back to optimistic console aggregates. Engine startup requirements must fit the supplied warm-up; the H1 card must check that explicitly.
 
-The returned `timerange` is the scoring window; `path_timerange` is the engine interval. Whole-path metrics are kept under `path_metrics`, never presented as selection/evaluation net metrics. Fix 4 must compute capital-weighted marked-to-market returns, costs and split metrics from these artefacts, with explicit treatment of Freqtrade's synthetic end-of-test closures. Until then, ledger net fields and split trade counts can remain NULL and the old promotion checks must not be used as a substitute.
+The returned `timerange` is the scoring window; `path_timerange` is the engine interval. Whole-path engine metrics are kept under `path_metrics`, never presented as selection/evaluation net metrics. Actual filled-order quantities and frozen daily closes produce `net-equity.feather`; pre-bar wallet inventory is cross-checked, not mistaken for closing NAV. A validated terminal synthetic `force_exit` sale is omitted, leaving that inventory marked at the final close with no fictitious exit charge. Ambiguous exports fail closed.
+
+Ledger `net_return`, `net_sharpe` and `max_drawdown` now contain independently computed split results. `n_trades_or_rebalances` counts actual fills in the split, excluding the synthetic terminal sale. Notes retain `opening_equity`, `ending_equity`, `cost_total`, `cost_model`, `equity_path`, `net_path_metrics`, `path_metrics` and the split artefact paths. A flat or single-return sample has NULL Sharpe rather than an invented statistic. Old promotion checks are not a substitute for the G0/G1 criteria.
 
 ## Shared ledger and search budget
 

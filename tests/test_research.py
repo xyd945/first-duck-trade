@@ -26,6 +26,7 @@ def experiment(tmp_path, monkeypatch):
                       "S2": {"manifest": str(s2), "hash": json.loads(s2.read_text())["data_snapshot_hash"]}},
         "params": {"ladder": [20, 60, 180], "sigma_target": 0.45, "vol_window": 60,
                    "rebalance_band": 0.025, "cost_rate": 0.003},
+        "costs": {"fee_rate": .001, "spread_rate": 0., "slippage_rate": .0005, "stress_multiplier": 2},
     }
     path = tmp_path / "research.json"
     path.write_text(json.dumps(config))
@@ -42,6 +43,7 @@ def runtime(experiment, tmp_path, monkeypatch):
     strategies.mkdir(parents=True)
     (strategies / "Toy.py").write_text("class Toy: pass\n")
     (base / "config.json").write_text(json.dumps({"dry_run": True, "fee": 0.003,
+        "dry_run_wallet": 1000., "stake_currency": "USDT",
         "exchange": {"name": "okx", "pair_whitelist": [p.replace('-', '/') for p in PAIRS]},
         "pairlists": [{"method": "StaticPairList"}], "trading_mode": "spot"}))
     monkeypatch.setattr(runner, "BASE_DIR", base)
@@ -85,6 +87,7 @@ def test_g0_config_hash_ignores_cost_and_snapshot_but_not_source(runtime, experi
     assert research.config_hash(descriptor) == expected
     engine = base / "config.json"
     policy["params"]["cost_rate"] = 0.0015
+    policy["costs"]["stress_multiplier"] = 1
     cfg = json.loads(engine.read_text())
     cfg["fee"] = 0.0015
     engine.write_text(json.dumps(cfg))
@@ -93,6 +96,31 @@ def test_g0_config_hash_ignores_cost_and_snapshot_but_not_source(runtime, experi
     (base / "strategies/candidates/Toy.py").write_text("class Toy: changed = True\n")
     changed, _ = research.describe_run(base, policy, "Toy", "1d")
     assert research.config_hash(changed) != expected
+
+
+def test_example_policy_supplies_explicit_stressed_costs():
+    from accounting import cost_rate
+    path = Path(__file__).resolve().parents[1] / "user_data/configs/research-h1.example.json"
+    policy = json.loads(path.read_text())
+    assert policy.get("costs"), "Example policy no longer satisfies the research contract"
+    assert cost_rate(policy["costs"]) == pytest.approx(policy["params"]["cost_rate"])
+    assert policy["costs"]["fee_rate"] == .001
+    assert policy["costs"]["stress_multiplier"] == 2
+
+
+def test_explicit_cost_model_is_bound_without_changing_statistical_hash(runtime, experiment):
+    _, base = runtime
+    _, policy = experiment
+    descriptor, config = research.describe_run(base, policy, "Toy", "1d")
+    assert config.get("research_costs") == policy["costs"], "Cost components are not frozen"
+    policy["costs"]["spread_rate"] = .0002
+    policy["costs"]["slippage_rate"] = .0004
+    revised, _ = research.describe_run(base, policy, "Toy", "1d")
+    assert revised["config_hash"] == descriptor["config_hash"]
+    assert research.registration_key(revised) != research.registration_key(descriptor)
+    policy["costs"]["stress_multiplier"] = 1
+    with pytest.raises(ValueError, match="cost"):
+        research.describe_run(base, policy, "Toy", "1d")
 
 
 def test_ledger_counts_distinct_selection_hashes_including_errors(experiment):
@@ -173,12 +201,24 @@ def fake_engine(cmd, **kwargs):
     export_dir = run_dir / Path(exported).relative_to("/freqtrade/user_data")
     export_dir.mkdir(parents=True, exist_ok=True)
     dates = pd.date_range(research.date(start), research.date(end) - pd.Timedelta(days=1))
-    wallets = pd.DataFrame({"date": dates, "currency": "BTC", "rate": 10., "balance": 2.})
+    wallets = pd.DataFrame([
+        {"date": day, "currency": "BTC", "rate": 10., "balance": 2.}
+        for day in dates if day > pd.Timestamp("2020-01-03", tz="UTC")
+    ] + [
+        {"date": day, "currency": "USDT", "rate": 1.,
+         "balance": 1000. if day <= pd.Timestamp("2020-01-03", tz="UTC") else 980.}
+        for day in dates
+    ])
     buf = io.BytesIO()
     wallets.to_feather(buf)
     trade = {"pair": "BTC/USDT", "open_date": "2020-01-03 00:00:00+00:00",
              "close_date": (research.date(end) - pd.Timedelta(days=1)).isoformat(),
-             "profit_abs": 20.}
+             "profit_abs": 20., "is_short": False, "leverage": 1., "exit_reason": "force_exit",
+             "orders": [
+                 {"order_filled_timestamp": int(pd.Timestamp("2020-01-03", tz="UTC").timestamp() * 1000),
+                  "ft_order_side": "buy", "amount": 2., "safe_price": 10., "ft_is_entry": True},
+                 {"order_filled_timestamp": int((research.date(end) - pd.Timedelta(days=1)).timestamp() * 1000),
+                  "ft_order_side": "sell", "amount": 2., "safe_price": 10., "ft_is_entry": False}]}
     stats = {"strategy": {"Toy": {"trades": [trade], "total_trades": 1,
               "sharpe": 7., "profit_total": 0.5, "backtest_start": research.date(start).isoformat(),
               "backtest_end": (research.date(end) - pd.Timedelta(days=1)).isoformat()}}}
@@ -219,6 +259,65 @@ def test_selection_runs_continuously_then_slices_without_resetting_positions(run
         row = conn.execute("SELECT * FROM trial_ledger").fetchone()
     assert row["verdict"] == "ok" and row["split"] == "selection"
     assert row["window_start"] == "20200105" and row["window_end"] == "20200107"
+
+
+def test_net_metrics_reach_ledger_and_full_path_artifact(runtime, monkeypatch):
+    runner, _ = runtime
+    monkeypatch.setattr(runner.subprocess, "run", fake_engine)
+    dev = runner.run_backtest("Toy", timeframe="1d", split="dev")
+    assert dev["success"], dev
+    assert "net_return" in dev, "Ledger still lacks marked net metrics"
+    assert dev["net_return"] == pytest.approx((2 - 20 * .003) / 1000)
+    curve = pd.read_feather(dev["equity_path"])
+    assert curve.equity.iloc[-1] == pytest.approx(1000 + 2 - 20 * .003)
+    assert curve.gross_exposure.iloc[-1] == 22  # terminal sale was synthetic
+    with research.ledger() as conn:
+        row = conn.execute("SELECT * FROM trial_ledger WHERE trial_id=?", (dev["trial_id"],)).fetchone()
+    for field in ("net_return", "net_sharpe", "max_drawdown"):
+        assert row[field] == pytest.approx(dev[field])
+    selection = runner.run_backtest("Toy", timeframe="1d", split="selection")
+    assert selection["success"], selection
+    assert selection["net_return"] == 0
+    assert selection["opening_equity"] == pytest.approx(curve.equity.iloc[-1])
+    assert selection["net_sharpe"] is None  # no invented Sharpe on zero-variance returns
+    assert selection["total_trades"] == 0  # no actual fills in the selection slice
+
+
+@pytest.mark.parametrize("case", ["missing_trade", "wrong_inventory", "duplicate_currency", "nan_balance", "missing_day"])
+def test_net_accounting_rejects_unreconciled_wallet_evidence(runtime, monkeypatch, case):
+    import io
+    import zipfile
+    runner, _ = runtime
+    def engine(cmd, **kwargs):
+        result = fake_engine(cmd, **kwargs)
+        run_dir = Path(cmd[cmd.index("--volume") + 1].split(":")[0])
+        archive = next(run_dir.rglob("fixture.zip"))
+        with zipfile.ZipFile(archive) as z:
+            entries = {name: z.read(name) for name in z.namelist()}
+        summary_name = "backtest-result-fixture.json"
+        wallet_name = "backtest-result-fixture_Toy_wallet.feather"
+        if case == "missing_trade":
+            payload = json.loads(entries[summary_name])
+            payload["strategy"]["Toy"]["trades"] = []
+            entries[summary_name] = json.dumps(payload).encode()
+        else:
+            wallet = pd.read_feather(io.BytesIO(entries[wallet_name]))
+            if case == "wrong_inventory": wallet.loc[wallet.currency == "BTC", "balance"] = 3.
+            if case == "duplicate_currency": wallet = pd.concat([wallet, wallet.iloc[[0]]])
+            if case == "nan_balance": wallet.loc[0, "balance"] = float("nan")
+            if case == "missing_day": wallet = wallet.loc[wallet.date != pd.Timestamp("2020-01-03", tz="UTC")]
+            buf = io.BytesIO()
+            wallet.reset_index(drop=True).to_feather(buf)
+            entries[wallet_name] = buf.getvalue()
+        with zipfile.ZipFile(archive, "w") as z:
+            for name, content in entries.items(): z.writestr(name, content)
+        return result
+    monkeypatch.setattr(runner.subprocess, "run", engine)
+    result = runner.run_backtest("Toy", timeframe="1d", split="dev")
+    assert not result["success"], "Unreconciled inventory produced apparently valid net metrics"
+    with research.ledger() as conn:
+        row = conn.execute("SELECT * FROM trial_ledger WHERE trial_id=?", (result["trial_id"],)).fetchone()
+    assert row["verdict"] == "error" and row["net_return"] is None
 
 
 def select_before_cutoff(trial):
