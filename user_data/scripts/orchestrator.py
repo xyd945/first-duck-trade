@@ -31,11 +31,13 @@ except ImportError:
     def notify_instance_down(*a, **kw): pass
     def notify_reflector_summary(*a, **kw): pass
 import sys
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
+import paper_risk
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.events import EVENT_JOB_ERROR
 
@@ -55,6 +57,7 @@ else:
 DATA_DIR = BASE_DIR / "data"
 REGIME_STATE_FILE = BASE_DIR / "data" / "regime_state.json"
 RISK_STATE_FILE = BASE_DIR / "data" / "risk_state.json"
+RISK_SNAPSHOT_FILE = BASE_DIR / "data" / "paper_account.json"
 
 # Freqtrade instance endpoints (container names resolve via Docker networking).
 # REST API credentials live in env vars rather than committed source — the
@@ -83,12 +86,6 @@ INSTANCES = {
     },
 }
 
-# Risk limits (NOT tunable by LLM, human-set only)
-RISK_LIMITS = {
-    "max_drawdown_daily_pct": 3.0,    # -3% daily max
-    "max_drawdown_total_pct": 10.0,   # -10% total kill switch
-    "crisis_regime_action": "stop_all",  # Stop all trading in crisis
-}
 
 MODE = os.environ.get("ORCHESTRATOR_MODE", "dry-run")
 
@@ -163,13 +160,20 @@ class FreqtradeClient:
         return self._request("GET", "balance")
 
     def start(self):
+        if not paper_risk.EXECUTION_ENABLED:
+            return {"status": "Execution is disabled"}
         return self._request("POST", "start")
 
     def stop(self):
         return self._request("POST", "stop")
 
+    def stop_entries(self):
+        return self._request("POST", "stopentry")
+
     def force_exit_all(self):
         """Force exit all open trades."""
+        if not paper_risk.EXECUTION_ENABLED:
+            return {"status": "Execution is disabled"}
         status = self.get_status()
         if status:
             for trade in status:
@@ -207,15 +211,14 @@ def save_regime_state(state: dict):
 # Risk State
 # ---------------------------------------------------------------------------
 def load_risk_state() -> dict:
-    if RISK_STATE_FILE.exists():
-        with open(RISK_STATE_FILE) as f:
-            return json.load(f)
-    return {
-        "kill_switch_active": False,
-        "daily_pnl": 0.0,
-        "total_pnl": 0.0,
-        "last_check": None,
-    }
+    try:
+        state = json.loads(RISK_STATE_FILE.read_text())
+        if not isinstance(state, dict):
+            raise ValueError("Invalid risk state")
+        return state
+    except (OSError, ValueError):
+        return {"kill_switch_active": True, "allow_new_exposure": False,
+                "reason": "Missing or invalid risk state; initialise explicitly after reconciliation"}
 
 
 def save_risk_state(state: dict):
@@ -389,6 +392,9 @@ def job_apply_regime():
     - In other regimes, start matching strategies and stop non-matching ones.
     """
     log.info("=== Job: Apply regime to instances ===")
+    if not paper_risk.EXECUTION_ENABLED:
+        job_check_risk()
+        return
     state = load_regime_state()
     regime = state.get("regime", "ranging")
     risk = load_risk_state()
@@ -438,48 +444,49 @@ def job_apply_regime():
 
 
 def job_check_risk():
-    """Frequent: check drawdown limits across all instances.
-
-    If daily drawdown exceeds limit or total drawdown hits kill switch,
-    stop everything immediately.
-    """
+    """Mark the entire designated paper account, then halt entries without liquidation."""
+    from deployment_manager import DeploymentManager
     risk = load_risk_state()
-
-    if risk.get("kill_switch_active"):
-        return  # Already dead
-
-    total_pnl = 0.0
-    for name, cfg in INSTANCES.items():
-        client = FreqtradeClient(cfg["url"], cfg["username"], cfg["password"])
-        profit = client.get_profit()
-        if profit and "profit_all_coin" in profit:
-            total_pnl += float(profit["profit_all_coin"])
-
-    # Check total drawdown kill switch
-    # Assuming 1000 USDT total capital (sum of both instances)
-    total_capital = 1000.0
-    drawdown_pct = abs(min(total_pnl, 0)) / total_capital * 100
-
-    if drawdown_pct >= RISK_LIMITS["max_drawdown_total_pct"]:
-        log.critical(
-            f"KILL SWITCH TRIGGERED! Drawdown: {drawdown_pct:.1f}% >= "
-            f"{RISK_LIMITS['max_drawdown_total_pct']}%. Stopping all trading."
-        )
-        for name, cfg in INSTANCES.items():
-            client = FreqtradeClient(cfg["url"], cfg["username"], cfg["password"])
-            if client.is_alive():
-                client.force_exit_all()
-                client.stop()
-
-        risk["kill_switch_active"] = True
-        risk["total_pnl"] = total_pnl
-        risk["trigger_reason"] = f"Drawdown {drawdown_pct:.1f}%"
+    instances = dict(INSTANCES)
+    try:
+        for deployed in DeploymentManager().list_deployed():
+            name = deployed["name"]
+            if not re.fullmatch(r"ft-deployed-[a-z0-9-]+", name):
+                raise ValueError("Invalid discovered instance name")
+            instances[name] = {"url": f"http://{name}:8080",
+                               "username": os.environ.get("FT_DEPLOYED_API_USERNAME", "freqtrader"),
+                               "password": os.environ.get("FT_DEPLOYED_API_PASSWORD", "")}
+        snapshot = json.loads(RISK_SNAPSHOT_FILE.read_text())
+        risk = paper_risk.evaluate(snapshot, risk, set(instances), datetime.now(timezone.utc))
+    except Exception as exc:
+        risk.update(kill_switch_active=True, allow_new_exposure=False,
+                    reason=f"Account reconciliation failed: {type(exc).__name__}")
+    # Persist the denial before attempting network calls; retries must not reopen entries.
+    try:
         save_risk_state(risk)
-        notify_kill_switch(risk["trigger_reason"], total_pnl)
-        return
-
-    risk["total_pnl"] = total_pnl
-    save_risk_state(risk)
+    except OSError:
+        risk.update(kill_switch_active=True, allow_new_exposure=False, reason="Risk state write failed")
+        log.critical("Risk state write failed; attempting all entry halts")
+    failures = []
+    if not risk.get("allow_new_exposure", False) or not paper_risk.EXECUTION_ENABLED:
+        for name, cfg in instances.items():
+            try:
+                client = FreqtradeClient(cfg["url"], cfg["username"], cfg["password"])
+                if not client.stop_entries():
+                    failures.append(name)
+            except Exception:
+                failures.append(name)
+        risk["stop_failures"] = failures
+        if failures:
+            risk.update(kill_switch_active=True, allow_new_exposure=False, reason="Entry halt failed")
+        try:
+            save_risk_state(risk)
+        except OSError:
+            risk.update(kill_switch_active=True, allow_new_exposure=False, reason="Risk state write failed")
+            log.critical("Risk halt could not be persisted; execution remains disabled")
+        if not risk.get("allow_new_exposure", False):
+            notify_kill_switch(risk.get("reason", "Entry halt"), risk.get("total_pnl", 0.))
+    return risk
 
 
 def job_health_check():
@@ -566,7 +573,7 @@ def job_reconcile_deployments():
         "RECONCILER_ACTING", "false"
     ).lower() in ("1", "true", "yes")
     allowlist = _parse_allowlist(os.environ.get("RECONCILER_ALLOWLIST", ""))
-    actually_acting = reconciler_acting and bool(allowlist)
+    actually_acting = paper_risk.EXECUTION_ENABLED and reconciler_acting and bool(allowlist)
     if reconciler_acting and not allowlist:
         log.info("  RECONCILER_ACTING=true but RECONCILER_ALLOWLIST empty — "
                  "shakedown safety net: behaving as observe-only until an id "

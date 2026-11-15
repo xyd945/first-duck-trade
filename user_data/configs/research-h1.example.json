@@ -10,6 +10,12 @@
     "S1": {"manifest": "../data/research/S1/manifest.json", "hash": ""},
     "S2": {"manifest": "../data/research/S2/manifest.json", "hash": ""}
   },
+  "costs": {
+    "fee_rate": 0.001,
+    "spread_rate": 0.0,
+    "slippage_rate": 0.0005,
+    "stress_multiplier": 2
+  },
   "params": {
     "ladder": [20, 60, 180],
     "sigma_target": 0.45,
