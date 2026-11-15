@@ -263,6 +263,8 @@ class PaperAdapter:
                          unfilled={p: q - holdings.get(p, 0.) for p, q in batch["targets"].items()},
                          filled_weights={p: holdings.get(p, 0.) * rows[p]["close"] / batch["equity"] for p in rows},
                          status="waiting" if account["pending"] else "finished")
+            if batch["status"] == "finished":
+                batch["finished_at"] = state["asof"]
             batch["divergence"] = any(abs(q) > 1e-8 for q in batch["unfilled"].values())
         else:
             batch.update(status="waiting", risk_reason=state["reason"], divergence=True)

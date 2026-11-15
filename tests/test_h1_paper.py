@@ -316,9 +316,16 @@ def test_wallet_refresh_finishes_after_tick_acquisition_time(paper_bot, tmp_path
         clock.current += pd.Timedelta(milliseconds=1)
         return original(*a, **kw)
     monkeypatch.setattr(bot.wallets, "update", delayed)
-    batch = PaperAdapter(bot, tmp_path / "journal.sqlite").step(rows(bot, {"BTC/USDT": .1}), quotes(bot, now), now)
+    adapter = PaperAdapter(bot, tmp_path / "journal.sqlite")
+    batch = adapter.step(rows(bot, {"BTC/USDT": .1}), quotes(bot, now), now)
     assert batch["holdings"]["BTC/USDT"] > 0
     assert batch["risk_scale"] == 1.
+    assert batch.get("finished_at") == clock.current.isoformat()
+    assert pd.Timestamp(batch["finished_at"]) > pd.Timestamp(now)
+    assert adapter.get("batch", batch["time"]) == batch
+    clock.current += pd.Timedelta(minutes=1)
+    restarted = PaperAdapter(bot, tmp_path / "journal.sqlite")
+    assert restarted.step(rows(bot, {"BTC/USDT": .1}), quotes(bot, clock.current), clock.current) == batch
 
 
 @pytest.mark.parametrize("bad", ["wallet", "sql", "fee", "position", "peak", "stale", "capital", "audit"])

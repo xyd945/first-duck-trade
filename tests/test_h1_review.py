@@ -129,27 +129,37 @@ def test_complete_forward_review_reconciles_real_fills_and_runs_backtest(paper_b
     assert row["data_snapshot_hash"]
 
 
-@pytest.mark.parametrize("divergence", [None, "latch", "reconcile", "reidentify"])
-def test_weekly_cli_keeps_finished_decision_when_later_tick_fails(paper_bot, tmp_path, divergence):
+@pytest.fixture
+def matched_forward(paper_bot, tmp_path):
     from h1_paper import PaperAdapter
     from h1_service import strategy_hash
     cfg = paper_bot.config
     (tmp_path / "identity.json").write_text(json.dumps({
         "selection": {"placeholder": False, "config_hash": strategy_hash(cfg["research_params"])},
         "params": cfg["research_params"], "rules": cfg["research_h1"], "git_sha": "test"}))
-    day = "2026-12-19T00:00:00+00:00"
     adapter = PaperAdapter(paper_bot, tmp_path / "journal.sqlite")
-    adapter.save("batch", day, {"time": day, "status": "finished", "risk_reason": "ok",
-                               "target_weights": dict.fromkeys(paper_bot.active_pair_whitelist, 0.)})
-    adapter.save("nav", day, {"date": day, "equity": 10000.})
-    failure = {"time": day, "observed": "2026-12-19T13:00:00+00:00", "error": "ticker timeout"}
-    adapter.save("error", day, failure)
-    if divergence:
-        adapter.save(divergence, "receipt", {"time": day, "reason": "operator fixture"})
+    for day in pd.date_range("2026-12-19", "2026-12-20", tz="UTC"):
+        adapter.save("batch", day.isoformat(), {"time": day.isoformat(), "status": "finished", "risk_reason": "ok",
+                     "finished_at": (day + pd.Timedelta(minutes=1)).isoformat(),
+                     "target_weights": dict.fromkeys(paper_bot.active_pair_whitelist, 0.)})
+        adapter.save("nav", day.isoformat(), {"date": day.isoformat(), "equity": 10000.})
     (tmp_path / "data").mkdir()
     for pair in paper_bot.active_pair_whitelist:
-        pd.DataFrame(dict(date=pd.date_range(end=day, periods=500), open=100., high=100., low=100., close=100., volume=1000.)).to_feather(
+        pd.DataFrame(dict(date=pd.date_range(end="2026-12-20", periods=500, tz="UTC"),
+                          open=100., high=100., low=100., close=100., volume=1000.)).to_feather(
             tmp_path / "data" / f"{pair.replace('/', '_')}-1d.feather")
+    return adapter
+
+
+@pytest.mark.parametrize("divergence", [None, "latch", "reconcile"])
+def test_weekly_cli_keeps_finished_decision_when_later_tick_fails(matched_forward, tmp_path, divergence):
+    adapter = matched_forward
+    day = "2026-12-19T00:00:00+00:00"
+    failure = {"time": day, "observed": "2026-12-19T13:00:00+00:00", "error": "ticker timeout"}
+    adapter.save("error", day, failure)
+    receipt = {"time": day, "observed": "2026-12-19T03:00:00+00:00", "reason": "operator fixture"}
+    if divergence:
+        adapter.save(divergence, "receipt", receipt)
     output = review_cli(tmp_path, through="2026-12-19")
     assert output.stdout, output.stderr
     row = json.loads(output.stdout)
@@ -158,11 +168,70 @@ def test_weekly_cli_keeps_finished_decision_when_later_tick_fails(paper_bot, tmp
     notes = json.loads(row["notes"])
     assert notes["comparison"]["total"] == 4
     assert notes["comparison"]["target_match_percent"] == 100.
-    assert notes["comparison"]["matched"] == (0 if divergence else 4)
+    assert notes["comparison"]["matched"] == 4
+    assert notes["comparison"]["pass"]
     if divergence:
-        assert notes["operational_divergences"] == [{"kind": divergence, "time": day, "reason": "operator fixture"}]
+        assert notes["operational_divergences"] == [{"kind": divergence, **receipt}]
+        assert adapter.get(divergence, "receipt") == receipt
     assert notes["operational_errors"] == [failure]
     assert adapter.get("error", day) == failure
+
+
+def test_weekly_cli_reidentify_after_finish_vetoes_next_decision(matched_forward, tmp_path):
+    adapter = matched_forward
+    day = "2026-12-19T00:00:00+00:00"
+    receipt = {"time": day, "observed": "2026-12-19T10:00:00+00:00", "reason": "Approved code upgrade"}
+    adapter.save("reidentify", "receipt", receipt)
+    output = review_cli(tmp_path, through="2026-12-20")
+    assert output.returncode == 0, output.stderr
+    notes = json.loads(json.loads(output.stdout)["notes"])
+    comparison = notes["comparison"]
+    assert comparison["total"] == 8
+    assert comparison["target_match_percent"] == 100.
+    first = [r for r in comparison["details"] if r["time"] == day]
+    next_day = [r for r in comparison["details"] if r["time"] != day]
+    assert sum(r["match"] for r in first) == 4
+    assert sum(r["match"] for r in next_day) == 0
+    assert all(r["reason"] == "reidentify" for r in next_day)
+    assert not comparison["pass"]
+    assert notes["operational_divergences"] == [{"kind": "reidentify", **receipt}]
+    assert adapter.get("batch", day)["risk_reason"] == "ok"
+    assert adapter.get("reidentify", "receipt") == receipt
+
+
+@pytest.mark.parametrize("kind", ["latch", "reconcile", "reidentify"])
+@pytest.mark.parametrize("status,finished_at", [
+    ("waiting", None),
+    ("finished", None),
+    ("finished", "2026-12-19T00:04:00+00:00"),
+    ("finished", "2026-12-19T00:03:00+00:00"),
+])
+def test_weekly_cli_vetoes_decision_not_proven_finished_before_receipt(
+        matched_forward, tmp_path, kind, status, finished_at):
+    adapter = matched_forward
+    day = "2026-12-19T00:00:00+00:00"
+    batch = adapter.get("batch", day)
+    batch.update(status=status)
+    batch.pop("finished_at")
+    if finished_at:
+        batch["finished_at"] = finished_at
+    adapter.save("batch", day, batch)
+    receipt = {"time": day, "observed": "2026-12-19T00:03:00+00:00", "reason": "Before completion"}
+    adapter.save(kind, "receipt", receipt)
+    output = review_cli(tmp_path, through="2026-12-20")
+    assert output.stdout, output.stderr
+    row = json.loads(output.stdout)
+    assert row["verdict"] == ("missed" if status != "finished" else "ok"), row["notes"]
+    notes = json.loads(row["notes"])
+    comparison = notes["comparison"]
+    assert comparison["total"] == 8
+    assert comparison["target_match_percent"] == 100.
+    assert sum(r["match"] for r in comparison["details"] if r["time"] == day) == 0
+    assert sum(r["match"] for r in comparison["details"] if r["time"] != day) == 4
+    assert not comparison["pass"]
+    assert notes["operational_divergences"] == [{"kind": kind, **receipt}]
+    assert adapter.get("batch", day) == batch
+    assert adapter.get(kind, "receipt") == receipt
 
 
 def test_weekly_cli_writes_and_returns_the_same_row(tmp_path):

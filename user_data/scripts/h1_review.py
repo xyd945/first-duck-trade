@@ -142,6 +142,14 @@ def write_forward(directory, through, *, now=None):
                 if first <= pd.Timestamp(r["time"]) <= end]
             for receipt in result["operational_divergences"]:
                 day = receipt["time"]
+                batch = batches.get(day, {})
+                finished_before = (batch.get("status") == "finished" and batch.get("finished_at")
+                                   and receipt.get("observed")
+                                   and pd.Timestamp(batch["finished_at"]) < pd.Timestamp(receipt["observed"]))
+                if finished_before:
+                    if receipt["kind"] != "reidentify":
+                        continue
+                    day = (pd.Timestamp(day) + pd.Timedelta(days=1)).isoformat()
                 batches[day] = {**batches.get(day, {"status": "missed"}), "time": day,
                                 "risk_reason": receipt["kind"]}
             nav = {r["date"]: r for r in records(directory, "nav")}

@@ -4,11 +4,11 @@ PR #56 supplies the isolated paper execution path. Its recovery fix adds audited
 
 ## Verified gates
 
-- Pinned engine H1 suite: **170 passed**, no failures or skips; 15 upstream pandas warnings.
+- Pinned engine H1 suite: **182 passed**, no failures or skips; 15 upstream pandas warnings.
 - Orchestrator suite: **722 passed, 26 skipped**, no failures; 7 existing warnings. Engine-dependent skips run in the separate engine suite. The counts overlap and must not be added as unique tests.
 - Archived development replay: **120/120 daily pair targets matched**, both raw and risk-adjusted agreement **100%**, over **2–31 December 2021**. It produced **32 real Freqtrade dry-run order records**.
 - Subprocess tests run the real service loop, pinned engine, SQLite journals and OS signals with exchange I/O replaced by synthetic fixtures and sockets denied. They cover a first-tick ticker failure followed by readiness within five minutes, lock contention, stop/status, foreign-PID refusal, failed starts, partial entry and restart without duplicate orders, malformed/stale risk state, stopped-only reconciliation, and audited code reidentification.
-- Weekly CLI subprocess tests cover complete evidence, missing decisions/NAV, late decisions, durable error receipts, corrupt data, changed strategy identity, placeholders, cost-check failure and idempotency. A finished day plus a later ticker error remains **4/4** matches; latch/reset/code-change receipts retain **0/4 adjusted** matches without erasing raw targets. An interrupted review retains an error row and its denominator.
+- Weekly CLI subprocess tests cover complete evidence, missing decisions/NAV, late decisions, durable error receipts, corrupt data, changed strategy identity, placeholders, cost-check failure and idempotency. A decision finished at 00:01 retains **4/4** adjusted matches after a 03:00 latch or reconciliation; a 10:00 code change vetoes the next day's decision instead. Unfinished decisions and legacy batches without completion timestamps remain vetoed. An interrupted review retains an error row and its denominator.
 - Check GitHub separately at the final PR head. Local verification is not a claim of green CI.
 
 The archived comparison is correctness evidence, not forward performance or a G2 pass. `h1-paper-replay/comparison.json` contains derived weights only; raw candles and runtime databases stay private. The adjacent manifest records source hashes and input snapshot provenance.
@@ -68,25 +68,30 @@ After investigating the outage or discrepancy, stop the service and confirm `run
 .venv-h1/bin/python user_data/scripts/h1_service.py stop
 .venv-h1/bin/python user_data/scripts/h1_service.py status
 .venv-h1/bin/python user_data/scripts/h1_service.py reconcile --reason "Investigated outage; wallet and SQL reconciled"
-.venv-h1/bin/python user_data/scripts/h1_service.py status
 .venv-h1/bin/python user_data/scripts/h1_service.py start
+.venv-h1/bin/python user_data/scripts/h1_service.py status
 ```
 
-Replace the example reason with the actual incident explanation. `reconcile` holds the exclusive service lock, requires existing state and uses fresh keyless public marks, the dry-run wallet and SQL fills/inventory, plus the single configured designated-notional value. It never sends orders. Its transaction appends the previous/new state, reason and UTC time before updating current risk/snapshot. It retains the equity high-water mark and same-day loss anchor/halt; an ongoing 5% drawdown or invalid evidence refuses reset. A remaining daily halt still denies new exposure and may prevent readiness until UTC rollover. The malformed first-tick state is recoverable without inventing trades or deleting receipts.
+Run `start` immediately after successful `reconcile`, **within 10 minutes**; do not pause between them to inspect the receipt. The next risk evaluation must also fall within 600 seconds of the reconciled timestamp, or it latches again. Any stop longer than 10 minutes latches on the next start unless fresh stopped-service reconciliation precedes it. Preserve the command's audit output and inspect it after startup; if the window expires, investigate and reconcile again before restarting.
 
-Latched days and reconciliation days remain explicit G2 divergences. Terminal missed/blocked decisions are not replayed after recovery. Inspect the returned state and preserve the audit receipt; a successful command is not permission to ignore another risk denial.
+Replace the example reason with the actual incident explanation. `reconcile` holds the exclusive service lock, requires existing state and uses fresh keyless public marks, the dry-run wallet and SQL fills/inventory, plus the single configured designated-notional value. It never sends orders. Its transaction appends the previous/new state, reason and UTC time before updating current risk/snapshot. It retains the equity high-water mark and same-day loss anchor/halt; an ongoing 5% drawdown or invalid evidence refuses reset. A remaining daily halt still denies new exposure. Restarting during that same-day halt times out after 300 seconds and terminates the child; reconcile and start again within **00:00–00:05 UTC** on the next day, or that day's decision is missed. The malformed first-tick state is recoverable without inventing trades or deleting receipts.
+
+Latch and reconciliation receipts veto only decisions not proven finished before the receipt was observed; later incidents do not erase completed matches. Their full audit receipts remain in the weekly notes. Terminal missed/blocked decisions are not replayed after recovery. A successful recovery command is not permission to ignore another risk denial.
 
 ### Deliberate code upgrades
 
-Normal operation never updates the pinned checkout. If Hermes approves a code upgrade, stop the service, preserve the state directory, verify the reviewed replacement tag/commit and switch this same detached worktree to it. Then acknowledge the change before reconciliation/restart:
+Normal operation never updates the pinned checkout. If Hermes approves a code upgrade, preserve a stopped-state backup and verify the reviewed replacement tag/commit. The required order is **stop, switch, reidentify, reconcile, start** in the same detached worktree and state directory:
 
 ```sh
+.venv-h1/bin/python user_data/scripts/h1_service.py stop
 git switch --detach "$APPROVED_REPLACEMENT_TAG"
 .venv-h1/bin/python user_data/scripts/h1_service.py reidentify --reason "Approved service fix; reviewed replacement commit"
+.venv-h1/bin/python user_data/scripts/h1_service.py reconcile --reason "Approved upgrade; wallet and SQL reconciled"
+.venv-h1/bin/python user_data/scripts/h1_service.py start
 .venv-h1/bin/python user_data/scripts/h1_service.py status
 ```
 
-`reidentify` requires a stopped service and only accepts a changed source commit; selection, strategy hash, parameters and rules must still match exactly. It appends old/new identity, reason and UTC time to the existing journal before atomically replacing `identity.json`. An interrupted replacement can leave a conservative extra audit receipt, never an unaudited accepted identity; inspect state and retry explicitly. The code-change day remains a G2 divergence. This command does not reset risk: use `reconcile --reason` separately if required, then `start`. Existing weekly rows remain immutable; a changed identity cannot rewrite a review already recorded for that week.
+`reidentify` requires a stopped service and only accepts a changed source commit; selection, strategy hash, parameters and rules must still match exactly. It appends old/new identity, reason and UTC time to the existing journal before atomically replacing `identity.json`. An interrupted replacement can leave a conservative extra audit receipt, never an unaudited accepted identity; inspect state and retry explicitly. The first decision under the new code remains a G2 divergence: the receipt day's decision if not yet finished, otherwise the next day's. This command does not reset risk: reconciliation is a separate step, followed immediately by `start` **within 10 minutes**. Existing weekly rows remain immutable; a changed identity cannot rewrite a review already recorded for that week.
 
 ## Execution and operational interpretation
 
@@ -119,7 +124,7 @@ Exit 0 means `ok`; exit 1 means a written non-`ok` row; argument/preflight error
 
 Every cumulative day/pair stays in the target comparison denominator. Missing, error, blocked, expired or unfinished decisions cannot count as adjusted matches. Raw target agreement is separate from risk-adjusted agreement. Both use a **0.5 percentage-point tolerance**, with the existing **95%** match threshold. When a rerun cannot be computed, `comparison_available=false` accompanies a conservative zero-match denominator; it is not a measured mismatch rate.
 
-`notes.operational_divergences` retains latch, reconciliation and code-change receipts. Those days cannot count as adjusted matches even if their target decision finished; operational fetch errors alone do not impose that veto.
+`notes.operational_divergences` retains every in-window latch, reconciliation and code-change receipt, whether or not it vetoes a decision. The adapter records `finished_at` once, after final settlement and reconciliation; restarts never move it. A latch or reconciliation vetoes its day's decision unless the batch is finished and `finished_at` is strictly earlier than the receipt's `observed` time. Missing timestamps and equal timestamps are conservatively vetoed. A later `reidentify` leaves that completed day unchanged and vetoes the next day's decision; otherwise it vetoes the receipt day's decision. Persistent latches still leave subsequent blocked batches divergent. Operational fetch errors alone do not impose an additional veto on finished decisions.
 
 Net metrics independently replay real SQL fills against captured closing marks and must reconcile to daily NAV. The cost check weights signed fill-versus-daily-open displacement plus the configured **0.15% aggregate simulated fee** by reference notional, and compares it with **0.225% per side**. This retains the accepted base-cost convention, including its embedded slippage allowance; it is not a separately measured exchange fee. No fills means the cost check is NULL, not passed. Full G2 duration, Monday-count and Sharpe gates remain outside this writer.
 
