@@ -109,7 +109,7 @@ class H1Backtesting(Backtesting):
         self.batches.append(record)
 
 
-def run_development(base, policy, strategy, config_path, *, exchange=None):
+def run_development(base, policy, strategy, config_path, *, exchange=None, sensitivity=False):
     """Every attempt gets a fix-2/4 ledger row; there is no selection/eval option."""
     from pathlib import Path
     from freqtrade.configuration import TimeRange
@@ -122,7 +122,7 @@ def run_development(base, policy, strategy, config_path, *, exchange=None):
     descriptor = {"hypothesis": "H1", "strategy": strategy}
     sha = ""
     owned_engine = None
-    verdict = "ok" if strategy == "H1Trend" else "baseline"
+    verdict = "sensitivity" if sensitivity else ("ok" if strategy == "H1Trend" else "baseline")
     try:
         sha = research.git_sha(Path(__file__).resolve().parents[2])
         policy = research.load_config(deepcopy(policy))
@@ -169,6 +169,7 @@ def run_development(base, policy, strategy, config_path, *, exchange=None):
             owned_engine.exchange.close()
     if trial is None:
         trial = research.start_trial(descriptor, "dev", "backtest", timerange, sha)
+    result.setdefault("params", {}).update(engine_version=freqtrade.__version__, ccxt_version=ccxt.__version__)
     research.finish_trial(trial, result, verdict)
     result.update(trial_id=trial, split="dev", config_hash=research.config_hash(descriptor))
     return result
@@ -183,6 +184,7 @@ def main():
     parser.add_argument("--engine-config", required=True)
     parser.add_argument("--strategy", choices=("H1Trend", "H1SimpleTrend", "H1EqualWeight", "H1BuyHold"), required=True)
     parser.add_argument("--config-id", help="Grid ID from policy, required for H1Trend")
+    parser.add_argument("--sensitivity", action="store_true", help="Label a cost sensitivity; no new statistical trial")
     args = parser.parse_args()
     base = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(base / "strategies/candidates"))
@@ -195,7 +197,7 @@ def main():
         if args.config_id not in grid_params(policy):
             parser.error("--config-id must name a registered grid configuration")
         policy["params"] = grid_params(policy)[args.config_id]
-    result = run_development(base, policy, args.strategy, args.engine_config)
+    result = run_development(base, policy, args.strategy, args.engine_config, sensitivity=args.sensitivity)
     print(json.dumps(result, indent=2, default=str))
     return 0 if result["success"] else 1
 

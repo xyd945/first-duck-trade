@@ -52,7 +52,10 @@ def test_real_export_populates_net_ledger_and_rerun(frozen_run):
     assert len(rows) == 1
     assert rows[0]["verdict"] == "baseline"
     assert rows[0]["net_return"] == result["net_return"]
-    assert Path(json.loads(rows[0]["notes"])["params"]["batch_path"]).exists()
+    notes = json.loads(rows[0]["notes"])
+    assert Path(notes["params"]["batch_path"]).exists()
+    assert notes["params"]["engine_version"] == "2026.10"
+    assert notes["params"]["ccxt_version"] == "4.5.90"
     assert research.search_budget()["H1"]["N"] == 0
 
 
@@ -106,6 +109,29 @@ def test_failure_before_engine_still_gets_one_ledger_row(frozen_run):
     with research.ledger() as conn:
         rows = [dict(r) for r in conn.execute("SELECT * FROM trial_ledger")]
     assert len(rows) == 1 and rows[0]["verdict"] == "error"
+    assert json.loads(rows[0]["notes"])["params"]["engine_version"] == "2026.10"
+
+
+def test_base_cost_is_logged_as_sensitivity_without_new_config_hash(frozen_run):
+    import research
+    from h1_backtest import run_development
+    base, policy, path, cfg = frozen_run
+    gate_descriptor, _ = research.describe_run(base, policy, "H1Trend", "1d", path)
+    policy["costs"]["stress_multiplier"] = 1
+    policy["params"]["cost_rate"] = cfg["fee"] = 0.0015
+    path.write_text(json.dumps(cfg))
+    exchange = offline_exchange(cfg)
+    try:
+        result = run_development(base, policy, "H1Trend", path, exchange=exchange, sensitivity=True)
+    finally:
+        exchange.close()
+    assert result["success"], result
+    with research.ledger() as conn:
+        row = dict(conn.execute("SELECT * FROM trial_ledger").fetchone())
+    assert row["verdict"] == "sensitivity"
+    assert row["config_hash"] == gate_descriptor["config_hash"]
+    assert json.loads(row["notes"])["cost_model"]["stress_multiplier"] == 1
+    assert research.search_budget()["H1"]["N"] == 0
 
 
 def test_engine_rejects_unlogged_calls():
