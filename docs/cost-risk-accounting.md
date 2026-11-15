@@ -31,7 +31,7 @@ For each scored split:
 
 Only a final `force_exit` order at the validated path end is synthetic. It is excluded from fills and fees; earlier partial sales remain real. The remaining position is marked at the final close, not liquidated at the synthetic export price. Full-path engine aggregates remain labelled `path_metrics` and never populate the net split columns.
 
-The export contract was inspected in Freqtrade tag `2026.10`: `persistence/trade_model.py`, `wallets.py`, `optimize/backtesting.py`, `optimize/optimize_reports/bt_storage.py` and `rpc/api_server/api_trading.py`. Tests run synthetic exports through the real parser, accounting and SQLite ledger. They do not claim a real-engine compatibility run; H1 must check that before using performance results.
+The export contract was inspected in Freqtrade tag `2026.10`: `persistence/trade_model.py`, `wallets.py`, `optimize/backtesting.py`, `optimize/optimize_reports/bt_storage.py` and `rpc/api_server/api_trading.py`. Tests run synthetic exports through the real parser, accounting and SQLite ledger. They do not claim a real-engine compatibility run; H1 must check that before using performance results. For H1, `tests/test_h1_runner.py` now runs the real pinned 2026.10 engine and its export through this parser, accounting and ledger on synthetic data (see `docs/h1-crypto-trend.md`).
 
 ## Paper account input and limits
 
