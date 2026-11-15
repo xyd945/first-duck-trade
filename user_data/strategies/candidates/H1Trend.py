@@ -57,8 +57,12 @@ class H1Trend(IStrategy):
             "historical_startup" if config.get("runmode") == RunMode.BACKTEST else "paper_startup"]
 
     def bot_start(self, **kwargs):
+        if self.config.get("runmode") == RunMode.DRY_RUN and self.config.get("dry_run") is True:
+            from h1_service import PAPER_TOKEN
+            if self.config.get("_h1_paper_adapter") is PAPER_TOKEN:
+                return
         if self.config.get("runmode") != RunMode.BACKTEST or not getattr(self, "_h1_adapter", False):
-            raise RuntimeError("H1 rebalance execution contract requires the logged historical adapter; paper activation is disabled")
+            raise RuntimeError("H1 rebalance execution contract requires the logged historical adapter or verified paper service")
 
     def _eligible(self, dataframe, pair):
         confirmed = dataframe.close.notna() & dataframe.close.gt(0)
