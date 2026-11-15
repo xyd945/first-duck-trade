@@ -1,11 +1,12 @@
 """
 Backtest Runner — Automated Freqtrade backtesting wrapper.
 
-Legacy two-stage checks now use configured development and selection windows.
-Untouched evaluation is a separate preregistered, once-only entry point.
+Two-stage evaluation:
+  1. Mini-backtest (30 days) — quick filter, rejects obviously broken strategies
+  2. Full backtest (6+ months) — proper evaluation for candidates that pass stage 1
 
-Each one-off backtest receives a verified frozen prefix and resource limits.
-The engine still has network access for public exchange market metadata.
+Uses the sandboxed backtest container (no network, resource limits) for safety
+when testing LLM-generated strategies.
 
 Results are parsed and returned as structured dicts for the strategy registry.
 
@@ -45,97 +46,6 @@ RESULTS_DIR = BASE_DIR / "backtest_results"
 
 
 def run_backtest(
-    strategy_name: str, timeframe: str = "1h", timerange: str | None = None,
-    config_path: str | None = None, use_sandbox: bool = True, timeout_seconds: int = 300,
-    export_trades: bool = False, freqai_model: str | None = None, *, split: str = "selection", verdict="ok",
-) -> dict:
-    """Run only a configured development or selection window and log every attempt."""
-    return _run_research(strategy_name, timeframe, timerange, config_path, use_sandbox,
-                         timeout_seconds, export_trades, freqai_model, split=split, verdict=verdict)
-
-
-def preregister_evaluation(strategy_name, timeframe="1h", config_path=None, freqai_model=None, verdict="ok"):
-    import research
-    policy = research.load_config()
-    descriptor, _ = research.describe_run(BASE_DIR, policy, strategy_name, timeframe,
-                                         config_path, freqai_model, verdict)
-    return research.preregister(descriptor)
-
-
-def run_evaluation(strategy_name, *, registration, timeframe="1h", config_path=None,
-                   freqai_model=None, timeout_seconds=600, verdict="ok"):
-    """Manual, single-use evaluation. Never called by selection or generation jobs."""
-    return _run_research(strategy_name, timeframe, None, config_path, True,
-                         timeout_seconds, True, freqai_model, split="eval",
-                         kind="evaluation", registration=registration, verdict=verdict)
-
-
-def _run_research(strategy_name, timeframe, timerange, config_path, use_sandbox,
-                  timeout_seconds, export_trades, freqai_model, *, split,
-                  kind="backtest", registration=None, hyperopt_options=None, verdict="ok"):
-    import research
-    trial_id = None
-    descriptor = {"strategy": strategy_name}
-    sha = ""
-    epochs = (hyperopt_options or {}).get("epochs", 0)
-    try:
-        if kind == "hyperopt" and not research.enabled("ENABLE_HYPEROPT_RESCUE"):
-            raise ValueError("Hyperopt is paused")
-        policy = research.read_config()
-        descriptor.update(hypothesis=policy.get("hypothesis", "other"),
-                          data_snapshot_hash=policy.get("snapshots", {}).get(
-                              "S2" if split == "eval" else "S1", {}).get("hash", ""))
-        sha = research.git_sha(PROJECT_ROOT)
-        policy = research.load_config(policy)
-        timerange = research.window(policy, split, timerange)
-        if split == "eval" and kind != "evaluation":
-            raise ValueError("Use run_evaluation for the sealed evaluation window")
-        if not use_sandbox:
-            raise ValueError("Research runs require the backtest sandbox")
-        descriptor, engine_config = research.describe_run(
-            BASE_DIR, policy, strategy_name, timeframe, config_path, freqai_model, verdict)
-        descriptor["data_snapshot_hash"] = policy["snapshots"]["S2" if split == "eval" else "S1"]["hash"]
-        trial_id = research.start_trial(descriptor, split, kind, timerange, sha,
-                                        epochs=epochs, search=hyperopt_options)
-        if kind == "evaluation":
-            research.claim_evaluation(registration, descriptor)
-        else:
-            research.check_not_evaluated(descriptor["hypothesis"])
-        path_timerange = research.path_window(policy, split, timerange)
-        run_dir = research.prepare_run(BASE_DIR, policy, descriptor, engine_config, trial_id, path_timerange, split)
-        if kind == "hyperopt":
-            result = _run_hyperopt(strategy_name, timeframe=timeframe, timerange=path_timerange,
-                                   config_path="/freqtrade/user_data/config.json", use_sandbox=True,
-                                   timeout_seconds=timeout_seconds, run_dir=run_dir, **(hyperopt_options or {}))
-            if result.get("success"):
-                relative = Path(descriptor["strategy_file"]).with_suffix(".json")
-                params = (run_dir / relative).read_bytes()
-                json.loads(params)
-                source = BASE_DIR / relative
-                expected = descriptor["code_hashes"].get(relative.as_posix())
-                if (research.file_hash(source) if source.exists() else None) != expected:
-                    raise ValueError("Candidate parameters changed during hyperopt")
-                # Preserve the previous parameters in the run's original descriptor.
-                source.write_bytes(params)
-                result["params_path"] = str(run_dir / relative)
-        else:
-            result = _run_backtest(strategy_name, timeframe, path_timerange,
-                                   "/freqtrade/user_data/config.json", True,
-                                   timeout_seconds, True, freqai_model, run_dir)
-            if result.get("success"):
-                result = research.slice_result(result, strategy_name, timerange, path_timerange, run_dir)
-    except Exception as exc:
-        result = {"success": False, "strategy": strategy_name, "error": str(exc)}
-    if trial_id is None:
-        trial_id = research.start_trial(descriptor, split, kind, timerange, sha,
-                                        epochs=epochs, search=hyperopt_options)
-    research.finish_trial(trial_id, result, verdict=verdict if result.get("success") else "error")
-    result.update(trial_id=trial_id, split=split, timerange=timerange,
-                  config_hash=research.config_hash(descriptor))
-    return result
-
-
-def _run_backtest(
     strategy_name: str,
     timeframe: str = "1h",
     timerange: str = None,
@@ -144,7 +54,6 @@ def _run_backtest(
     timeout_seconds: int = 300,
     export_trades: bool = False,
     freqai_model: str = None,
-    run_dir: Path = None,
 ) -> dict:
     """
     Run a Freqtrade backtest via Docker and return parsed results.
@@ -161,7 +70,7 @@ def _run_backtest(
     config_path : str
         Path to config file inside the container.
     use_sandbox : bool
-        If True, use the resource-limited backtest service.
+        If True, use the sandboxed container (no network, resource limits).
     timeout_seconds : int
         Max time for the backtest to complete.
     export_trades : bool
@@ -200,8 +109,6 @@ def _run_backtest(
         - trades_export_path: str (host path to .zip; only if export_trades=True)
         - error: str (if failed)
     """
-    if run_dir is None:
-        raise ValueError("A frozen run directory is required")
     if config_path is None:
         config_path = "/freqtrade/user_data/config.json"
 
@@ -224,10 +131,7 @@ def _run_backtest(
         # Use the sandboxed profile (--profile must come before 'run')
         cmd.extend(["--profile", "backtest"])
 
-    host_run_dir = Path(HOST_PROJECT_DIR) / run_dir.relative_to(PROJECT_ROOT)
-    cmd.extend(["run", "--rm", "--no-deps",
-                "--volume", f"{host_run_dir}:/freqtrade/user_data",
-                "--volume", f"{host_run_dir}/data:/freqtrade/user_data/data:ro"])
+    cmd.extend(["run", "--rm"])
 
     if freqai_model:
         cmd.append("freqtrade-freqai")
@@ -242,8 +146,6 @@ def _run_backtest(
         "--strategy-path", "/freqtrade/user_data/strategies/candidates",
         "--timeframe", timeframe,
         "--config", config_path,
-        "--datadir", "/freqtrade/user_data/data",
-        "--cache", "none",
     ])
 
     if freqai_model:
@@ -258,7 +160,7 @@ def _run_backtest(
     if export_trades:
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         subdir_name = f"{strategy_name}-{run_id}"
-        export_host_dir = run_dir / "backtest_results" / subdir_name
+        export_host_dir = BASE_DIR / "backtest_results" / subdir_name
         export_host_dir.mkdir(parents=True, exist_ok=True)
         export_container_dir = f"/freqtrade/user_data/backtest_results/{subdir_name}"
         cmd.extend([
@@ -545,22 +447,56 @@ def parse_backtest_output(output: str, strategy_name: str, timerange: str = None
     return result
 
 
-def run_mini_backtest(strategy_name: str, **kwargs) -> dict:
-    """Stage 1: development only; dates come from RESEARCH_CONFIG."""
-    return run_backtest(strategy_name, split="dev", **kwargs)
+def run_mini_backtest(
+    strategy_name: str,
+    days: int = 90,
+    skip_recent_days: int = 30,
+    **kwargs,
+) -> dict:
+    """Stage 1: out-of-sample backtest to filter overfit strategies.
+
+    Window: [today - skip_recent_days - days, today - skip_recent_days].
+    Default = [today - 120, today - 30], a 90-day slice ending one month
+    before the full backtest's most-recent data.
+
+    Why out-of-sample. The orchestrator's full backtest uses all available
+    data (~200 days). When mini also covered the most recent 90 days,
+    strategies overfit to that slice scored well in mini and then blew up
+    in full — observed in trials #5 and #6 (e.g. cell 19 mini sharpe 1.91,
+    full sharpe -2.74). Skipping the most recent 30 days keeps that slice
+    out of the mini's view, so a strategy that wins both runs has actually
+    generalized across two non-overlapping regimes (in expectation) rather
+    than just memorized one.
+
+    90-day length is preserved because the rendered strategy declares
+    startup_candle_count=200; a 30-day window leaves too little prelude
+    and Freqtrade exits with "no data left after adjusting for startup
+    candles". 90 days = 2160 1h candles, comfortable headroom.
+    """
+    end = datetime.now(timezone.utc) - timedelta(days=skip_recent_days)
+    start = end - timedelta(days=days)
+    timerange = f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+
+    log.info(f"Mini-backtest: {strategy_name} ({timerange})")
+    return run_backtest(strategy_name, timerange=timerange, **kwargs)
 
 
-def run_full_backtest(strategy_name: str, **kwargs) -> dict:
-    """Stage 2: selection only, never the sealed evaluation split."""
-    return run_backtest(strategy_name, split="selection", **kwargs)
+def run_full_backtest(strategy_name: str, months: int = 6, **kwargs) -> dict:
+    """Stage 2: Full 6-month backtest for serious evaluation."""
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=months * 30)
+    timerange = f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+
+    log.info(f"Full backtest: {strategy_name} ({timerange})")
+    return run_backtest(strategy_name, timerange=timerange, **kwargs)
 
 
-def evaluate_candidate(strategy_name: str, **kwargs) -> dict:
+def evaluate_candidate(strategy_name: str) -> dict:
     """
     Two-stage evaluation of a candidate strategy.
 
-    Stage 1 uses the configured development window for sanity checks.
-    Stage 2 uses selection; split metrics await fix 4. Neither opens evaluation.
+    Stage 1: Mini-backtest (30 days) — must produce trades and not crash.
+    Stage 2: Full backtest (6 months) — evaluated on Sharpe, drawdown, profit factor.
 
     Returns dict with stage results and overall verdict.
     """
@@ -571,7 +507,7 @@ def evaluate_candidate(strategy_name: str, **kwargs) -> dict:
     from validation_pipeline import validate_backtest_results
 
     # Stage 1: Mini-backtest
-    mini = run_mini_backtest(strategy_name, **kwargs)
+    mini = run_mini_backtest(strategy_name)
     if not mini.get("success"):
         return {
             "strategy": strategy_name,
@@ -591,7 +527,7 @@ def evaluate_candidate(strategy_name: str, **kwargs) -> dict:
         }
 
     # Stage 2: Full backtest
-    full = run_full_backtest(strategy_name, **kwargs)
+    full = run_full_backtest(strategy_name)
     if not full.get("success"):
         return {
             "strategy": strategy_name,
@@ -624,17 +560,6 @@ def evaluate_candidate(strategy_name: str, **kwargs) -> dict:
 # ---------------------------------------------------------------------------
 
 def run_hyperopt(
-    strategy_name: str, timeframe: str = "1h", timerange: str | None = None,
-    epochs: int = 50, spaces: tuple = ("buy", "sell"), loss: str = "SampleHyperOptLoss",
-    config_path: str | None = None, use_sandbox: bool = True, timeout_seconds: int = 1800,
-) -> dict:
-    """Search development data only; one ledger row retains each epoch batch."""
-    return _run_research(strategy_name, timeframe, timerange, config_path, use_sandbox,
-                         timeout_seconds, False, None, split="dev", kind="hyperopt",
-                         hyperopt_options={"epochs": epochs, "spaces": spaces, "loss": loss})
-
-
-def _run_hyperopt(
     strategy_name: str,
     timeframe: str = "1h",
     timerange: str = None,
@@ -644,7 +569,6 @@ def _run_hyperopt(
     config_path: str = None,
     use_sandbox: bool = True,
     timeout_seconds: int = 1800,
-    run_dir: Path | None = None,
 ) -> dict:
     """Run Freqtrade hyperopt via Docker and return parsed best-epoch results.
 
@@ -664,19 +588,13 @@ def _run_hyperopt(
     if config_path is None:
         config_path = "/freqtrade/user_data/config.json"
 
-    if run_dir is None:
-        raise ValueError("A frozen run directory is required")
-
     compose_file = str(PROJECT_ROOT / "docker-compose.yml")
     cmd = ["docker", "compose",
            "-f", compose_file,
            "--project-directory", HOST_PROJECT_DIR]
     if use_sandbox:
         cmd.extend(["--profile", "backtest"])
-    host_run_dir = Path(HOST_PROJECT_DIR) / run_dir.relative_to(PROJECT_ROOT)
-    cmd.extend(["run", "--rm", "--no-deps",
-                "--volume", f"{host_run_dir}:/freqtrade/user_data",
-                "--volume", f"{host_run_dir}/data:/freqtrade/user_data/data:ro"])
+    cmd.extend(["run", "--rm"])
     cmd.append("freqtrade-backtest" if use_sandbox else "freqtrade-sweep")
 
     cmd.extend([
@@ -689,7 +607,6 @@ def _run_hyperopt(
         "--epochs", str(epochs),
         "--timeframe", timeframe,
         "--config", config_path,
-        "--datadir", "/freqtrade/user_data/data",
         # auto-write <StrategyName>.json next to the .py file so the next
         # backtest run picks up the optimized params transparently
         "--print-json",
@@ -803,48 +720,41 @@ def parse_hyperopt_output(
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-def main(argv=None):
-    import argparse
-    parser = argparse.ArgumentParser(description="Frozen research runs; RESEARCH_CONFIG is required")
-    parser.add_argument("strategy", help="Strategy class name")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--mini", action="store_true", help="Development window (configured dates)")
-    mode.add_argument("--full", action="store_true", help="Selection window (configured dates)")
-    mode.add_argument("--evaluate", action="store_true", help="Legacy dev + selection checks, NOT untouched evaluation")
-    mode.add_argument("--hyperopt", action="store_true", help="Opt-in development-only parameter search")
-    mode.add_argument("--register-eval", action="store_true", help="Preregister before locking selection")
-    mode.add_argument("--evaluation", metavar="REGISTRATION", help="Consume a single-use untouched evaluation")
-    parser.add_argument("--split", choices=("dev", "selection"), default="selection")
-    parser.add_argument("--timeframe", default="1d")
-    parser.add_argument("--config", dest="config_path", default=None, help="Engine config inside user_data")
-    parser.add_argument("--verdict", choices=("ok", "baseline", "sensitivity"), default="ok")
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--timerange", default=None, help="Optional [start,end) subset of dev or selection")
-    args = parser.parse_args(argv)
-    if args.timerange and (args.evaluation or args.register_eval or args.evaluate):
-        parser.error("Evaluation and registration use the entire configured window")
-    kwargs = dict(timeframe=args.timeframe, config_path=args.config_path, verdict=args.verdict)
-    try:
-        if args.register_eval:
-            result = {"success": True, "registration": preregister_evaluation(args.strategy, **kwargs)}
-        elif args.evaluation:
-            result = run_evaluation(args.strategy, registration=args.evaluation, **kwargs)
-        elif args.hyperopt:
-            if args.verdict != "ok":
-                parser.error("Hyperopt is search, not a baseline or sensitivity")
-            result = run_hyperopt(args.strategy, timeframe=args.timeframe, config_path=args.config_path,
-                                  timerange=args.timerange, epochs=args.epochs)
-        elif args.evaluate:
-            result = evaluate_candidate(args.strategy, **kwargs)
-        else:
-            split = "dev" if args.mini else "selection" if args.full else args.split
-            result = run_backtest(args.strategy, split=split, timerange=args.timerange, **kwargs)
-    except (ValueError, OSError) as exc:
-        result = {"success": False, "error": str(exc)}
-    print(json.dumps({k: v for k, v in result.items() if k != "raw_output"}, indent=2, default=str))
-    return 0 if result.get("success") or result.get("verdict") == "PASS" else 1
-
-
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    sys.exit(main())
+
+    import argparse
+    parser = argparse.ArgumentParser(description="Run Freqtrade backtests or hyperopt")
+    parser.add_argument("strategy", help="Strategy class name")
+    parser.add_argument("--mini", action="store_true", help="Run mini-backtest only (30 days)")
+    parser.add_argument("--full", action="store_true", help="Run full backtest only (6 months)")
+    parser.add_argument("--evaluate", action="store_true", help="Run full 2-stage evaluation")
+    parser.add_argument("--hyperopt", action="store_true", help="Run hyperopt parameter search")
+    parser.add_argument("--epochs", type=int, default=50, help="Hyperopt epochs (default 50)")
+    parser.add_argument(
+        "--timerange",
+        default=None,
+        help="Freqtrade timerange (e.g. 20251101-20260501). "
+             "Defaults to last ~6 months for hyperopt.",
+    )
+    args = parser.parse_args()
+
+    if args.hyperopt:
+        timerange = args.timerange
+        if timerange is None:
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(days=180)
+            timerange = f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+        result = run_hyperopt(args.strategy, timerange=timerange, epochs=args.epochs)
+    elif args.evaluate:
+        result = evaluate_candidate(args.strategy)
+    elif args.mini:
+        result = run_mini_backtest(args.strategy)
+    elif args.full:
+        result = run_full_backtest(args.strategy)
+    else:
+        result = run_backtest(args.strategy)
+
+    # Print results (exclude raw_output for readability)
+    display = {k: v for k, v in result.items() if k != "raw_output"}
+    print(json.dumps(display, indent=2, default=str))

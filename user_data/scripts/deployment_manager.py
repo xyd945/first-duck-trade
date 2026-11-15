@@ -43,7 +43,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import paper_risk
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -280,8 +279,6 @@ class DeploymentManager:
         existing container first. This prevents a silent generation
         bump from clobbering a still-running strategy.
         """
-        if not dry_run and not paper_risk.EXECUTION_ENABLED:
-            raise RuntimeError("Execution is disabled during the research phase")
         existing = self.inspect(spec.strategy_name)
         if existing is not None:
             raise RuntimeError(

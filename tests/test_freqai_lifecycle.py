@@ -171,12 +171,11 @@ def _capture_cmd(monkeypatch):
 
 def test_run_backtest_freqai_uses_freqai_service_and_model(monkeypatch):
     br, captured = _capture_cmd(monkeypatch)
-    br._run_backtest(
+    br.run_backtest(
         "FreqaiLgbmBaseline",
         timerange="20260101-20260401",
         config_path="/freqtrade/user_data/configs/freqai/FreqaiLgbmBaseline.json",
         freqai_model="LightGBMRegressor",
-        run_dir=br.BASE_DIR / "research_runs" / "command-fixture",
     )
     cmd = captured["cmd"]
     assert "freqtrade-freqai" in cmd
@@ -190,8 +189,7 @@ def test_run_backtest_freqai_uses_freqai_service_and_model(monkeypatch):
 
 def test_run_backtest_freqai_requires_timerange(monkeypatch):
     br, captured = _capture_cmd(monkeypatch)
-    result = br._run_backtest("FreqaiLgbmBaseline", freqai_model="LightGBMRegressor",
-                              run_dir=br.BASE_DIR / "research_runs" / "command-fixture")
+    result = br.run_backtest("FreqaiLgbmBaseline", freqai_model="LightGBMRegressor")
     assert result["success"] is False
     assert "timerange" in result["error"]
     assert "cmd" not in captured  # never reached docker
@@ -199,8 +197,7 @@ def test_run_backtest_freqai_requires_timerange(monkeypatch):
 
 def test_run_backtest_rule_path_unchanged(monkeypatch):
     br, captured = _capture_cmd(monkeypatch)
-    br._run_backtest("SomeRuleStrategy", timerange="20260101-20260401",
-                     run_dir=br.BASE_DIR / "research_runs" / "command-fixture")
+    br.run_backtest("SomeRuleStrategy")
     cmd = captured["cmd"]
     assert "freqtrade-backtest" in cmd
     assert "freqtrade-freqai" not in cmd

@@ -1,7 +1,0 @@
-# H1 engine pin (Hermes decision, 2026-11-15): Freqtrade 2026.10 (commit 4cf0351)
-# with the ccxt version pinned in that tag's requirements.txt. Every H1 backtest and
-# the H1 dry-run must use this engine; user_data/scripts/h1_backtest.py asserts both.
-# Legacy docker-compose services keep their own `stable` image tags.
-freqtrade==2026.10
-ccxt==4.5.90
-pytest==9.2.0
