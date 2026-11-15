@@ -131,9 +131,19 @@ def write_forward(directory, through, *, now=None):
             result["error"] = "Forward strategy changed after selection"
         else:
             batches = {r["time"]: r for r in records(directory, "batch")}
-            errors = {r["time"]: r for r in records(directory, "error")}
-            for day, failure in errors.items():
-                batches[day] = {**batches.get(day, {}), "time": day, "status": "error", "risk_reason": failure["error"]}
+            errors = [r for r in records(directory, "error") if first <= pd.Timestamp(r["time"]) <= end]
+            result["operational_errors"] = errors
+            for failure in errors:
+                day = failure["time"]
+                if batches.get(day, {}).get("status") != "finished":
+                    batches[day] = {**batches.get(day, {}), "time": day, "status": "error", "risk_reason": failure["error"]}
+            result["operational_divergences"] = [dict(kind=kind, **r)
+                for kind in ("latch", "reconcile", "reidentify") for r in records(directory, kind)
+                if first <= pd.Timestamp(r["time"]) <= end]
+            for receipt in result["operational_divergences"]:
+                day = receipt["time"]
+                batches[day] = {**batches.get(day, {"status": "missed"}), "time": day,
+                                "risk_reason": receipt["kind"]}
             nav = {r["date"]: r for r in records(directory, "nav")}
             days = pd.date_range(first, end)
             missing = [day.isoformat() for day in days if day.isoformat() not in batches or day.isoformat() not in nav]

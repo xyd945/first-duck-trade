@@ -95,6 +95,15 @@ def test_service_status_does_not_create_runtime_or_start_a_bot(tmp_path):
     assert not directory.exists()
 
 
+def test_status_tolerates_a_journal_whose_schema_is_still_starting(tmp_path):
+    import sqlite3
+    from h1_service import status
+    sqlite3.connect(tmp_path / "journal.sqlite").close()
+    result = status(tmp_path)
+    assert result["risk"] is None
+    assert result["ready"] is False
+
+
 def test_start_refuses_before_forward_date_without_spawning(tmp_path, monkeypatch):
     from datetime import datetime, timezone
     import subprocess
@@ -134,6 +143,8 @@ def offline_service(tmp_path, monkeypatch):
     pytest.importorskip("freqtrade")
     import h1_service
     import subprocess
+    import time
+    monkeypatch.setenv("H1_OFFLINE_STARTED", str(time.monotonic()))
     from datetime import datetime, timezone
     class Clock(datetime):
         @classmethod
@@ -161,8 +172,10 @@ def offline_service(tmp_path, monkeypatch):
                 child.wait(timeout=3)
 
 
-def test_offline_start_waits_for_ready_and_stop_releases_lock(offline_service, tmp_path):
+@pytest.mark.parametrize("mode_name", ["ready", "lock-race"])
+def test_offline_start_waits_for_ready_and_stop_releases_lock(offline_service, tmp_path, mode_name):
     service, mode, children = offline_service
+    mode[0] = mode_name
     directory = tmp_path / "paper"
     result = service.start(ROOT / "user_data/configs/h1_dryrun.json", directory, tmp_path / "ledger", placeholder=True)
     assert result["ready"] is True
@@ -175,6 +188,24 @@ def test_offline_start_waits_for_ready_and_stop_releases_lock(offline_service, t
     children[0].wait(timeout=3)
     assert service.status(directory)["ready"] is False
     assert service.status(directory)["heartbeat"]["state"] == "stopped"
+
+
+def test_first_tick_transient_recovers_to_ready_within_decision_window(offline_service, tmp_path):
+    import sqlite3
+    from datetime import datetime
+    service, mode, children = offline_service
+    mode[0] = "transient-once"
+    result = service.start(ROOT / "user_data/configs/h1_dryrun.json", tmp_path, tmp_path / "ledger", placeholder=True)
+    assert result["ready"]
+    assert result["heartbeat"]["batch_status"] == "finished"
+    assert datetime.fromisoformat(result["heartbeat"]["asof"]).minute < 5
+    assert not result["heartbeat"]["risk"]["kill_switch_active"]
+    service.stop(tmp_path)
+    children[0].wait(timeout=3)
+    with sqlite3.connect(tmp_path / "journal.sqlite") as conn:
+        errors = conn.execute("SELECT payload FROM paper_records WHERE kind='error'").fetchall()
+    assert len(errors) == 1
+    assert json.loads(errors[0][0])["error"] == "offline transient ticker failure"
 
 
 @pytest.mark.parametrize("mode_name", ["exit", "tick-error", "entry-error", "hang"])
@@ -197,10 +228,15 @@ def test_failed_start_reaps_only_its_child(offline_service, tmp_path, monkeypatc
             with sqlite3.connect(tmp_path / "trades.sqlite") as conn:
                 assert conn.execute("SELECT count(*) FROM orders").fetchone()[0] == 1
             mode[0] = "resume-entry"
-            with pytest.raises(RuntimeError):
-                service.start(ROOT / "user_data/configs/h1_dryrun.json", tmp_path, tmp_path / "ledger", placeholder=True)
+            result = service.start(ROOT / "user_data/configs/h1_dryrun.json", tmp_path, tmp_path / "ledger", placeholder=True)
+            assert result["ready"]
+            service.stop(tmp_path)
+            children[-1].wait(timeout=3)
             with sqlite3.connect(tmp_path / "trades.sqlite") as conn:
-                assert conn.execute("SELECT count(*) FROM orders").fetchone()[0] == 1
+                assert dict(conn.execute("SELECT ft_pair,count(*) FROM orders GROUP BY ft_pair")) == {
+                    "BTC/USDT": 1, "SOL/USDT": 1, "XRP/USDT": 1}
+            with sqlite3.connect(tmp_path / "journal.sqlite") as conn:
+                assert conn.execute("SELECT payload FROM paper_records WHERE kind='error'").fetchone() == record
 
 
 def test_stop_rejects_foreign_pid_without_signal(tmp_path, monkeypatch):

@@ -90,7 +90,7 @@ def test_complete_forward_review_reconciles_real_fills_and_runs_backtest(paper_b
             conn.execute("DELETE FROM paper_records WHERE kind=? AND id=?", ("batch" if case == "missing" else "nav", key))
     elif case in ("late", "error"):
         batch = adapter.get("batch", key)
-        batch.update(status="missed" if case == "late" else "finished", risk_reason=case if case == "late" else "ok")
+        batch.update(status="missed" if case == "late" else "buying", risk_reason=case if case == "late" else "ok")
         adapter.save("batch", key, batch)
         if case == "error":
             adapter.save("error", key, {"time": key, "error": "transient failure before recovery"})
@@ -127,6 +127,42 @@ def test_complete_forward_review_reconciles_real_fills_and_runs_backtest(paper_b
     assert notes["cost_check_pass"] is (case != "cost")
     assert notes["average_cost_per_side"] == pytest.approx((1 + .15) / 99 if case == "cost" else .0015)
     assert row["data_snapshot_hash"]
+
+
+@pytest.mark.parametrize("divergence", [None, "latch", "reconcile", "reidentify"])
+def test_weekly_cli_keeps_finished_decision_when_later_tick_fails(paper_bot, tmp_path, divergence):
+    from h1_paper import PaperAdapter
+    from h1_service import strategy_hash
+    cfg = paper_bot.config
+    (tmp_path / "identity.json").write_text(json.dumps({
+        "selection": {"placeholder": False, "config_hash": strategy_hash(cfg["research_params"])},
+        "params": cfg["research_params"], "rules": cfg["research_h1"], "git_sha": "test"}))
+    day = "2026-12-19T00:00:00+00:00"
+    adapter = PaperAdapter(paper_bot, tmp_path / "journal.sqlite")
+    adapter.save("batch", day, {"time": day, "status": "finished", "risk_reason": "ok",
+                               "target_weights": dict.fromkeys(paper_bot.active_pair_whitelist, 0.)})
+    adapter.save("nav", day, {"date": day, "equity": 10000.})
+    failure = {"time": day, "observed": "2026-12-19T13:00:00+00:00", "error": "ticker timeout"}
+    adapter.save("error", day, failure)
+    if divergence:
+        adapter.save(divergence, "receipt", {"time": day, "reason": "operator fixture"})
+    (tmp_path / "data").mkdir()
+    for pair in paper_bot.active_pair_whitelist:
+        pd.DataFrame(dict(date=pd.date_range(end=day, periods=500), open=100., high=100., low=100., close=100., volume=1000.)).to_feather(
+            tmp_path / "data" / f"{pair.replace('/', '_')}-1d.feather")
+    output = review_cli(tmp_path, through="2026-12-19")
+    assert output.stdout, output.stderr
+    row = json.loads(output.stdout)
+    assert row["verdict"] == "ok", row["notes"]
+    assert output.returncode == 0
+    notes = json.loads(row["notes"])
+    assert notes["comparison"]["total"] == 4
+    assert notes["comparison"]["target_match_percent"] == 100.
+    assert notes["comparison"]["matched"] == (0 if divergence else 4)
+    if divergence:
+        assert notes["operational_divergences"] == [{"kind": divergence, "time": day, "reason": "operator fixture"}]
+    assert notes["operational_errors"] == [failure]
+    assert adapter.get("error", day) == failure
 
 
 def test_weekly_cli_writes_and_returns_the_same_row(tmp_path):

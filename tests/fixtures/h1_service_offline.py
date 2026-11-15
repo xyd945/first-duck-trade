@@ -1,5 +1,6 @@
 """Offline subprocess boundary: real service, engine, database and signals."""
 import sys
+import os
 import time
 import socket
 from datetime import datetime, timezone, timedelta
@@ -18,7 +19,7 @@ import numpy as np
 
 mode, script, *arguments = sys.argv[1:]
 sys.argv = [script, *arguments]
-started = time.monotonic()
+started = float(os.environ["H1_OFFLINE_STARTED"])
 
 
 class Clock(datetime):
@@ -71,6 +72,15 @@ def initialise(self, config):
     self.dataprovider.ohlcv = lambda *a, **kw: frame
     if mode == "tick-error":
         self.exchange.get_tickers = no_network
+    if mode == "transient-once":
+        good = self.exchange.get_tickers
+        attempts = []
+        def flaky(*args, **kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("offline transient ticker failure")
+            return good(*args, **kwargs)
+        self.exchange.get_tickers = flaky
     if mode == "entry-error":
         enter = self.execute_entry
         attempts = []
@@ -82,5 +92,19 @@ def initialise(self, config):
         self.execute_entry = fail_second
 
 
-with patch.object(ExchangeResolver, "load_exchange", load_exchange), patch.object(FreqtradeBot, "__init__", initialise):
+flock = h1_service.fcntl.flock
+contended = []
+
+
+def acquire(handle, operation):
+    if mode == "lock-race" and not contended:
+        from threading import Timer
+        other = open(handle.name, "a+")
+        flock(other, operation)
+        contended.append(other)
+        Timer(.25, other.close).start()
+    return flock(handle, operation)
+
+
+with patch.object(ExchangeResolver, "load_exchange", load_exchange), patch.object(FreqtradeBot, "__init__", initialise), patch.object(h1_service.fcntl, "flock", acquire):
     raise SystemExit(h1_service.main())

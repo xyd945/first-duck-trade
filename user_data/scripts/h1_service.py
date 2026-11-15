@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -186,6 +187,12 @@ def status(directory):
             except BlockingIOError:
                 running = True
     result = {"running": running, "directory": str(directory)}
+    journal = directory / "journal.sqlite"
+    if journal.exists():
+        with sqlite3.connect(f"file:{journal.resolve()}?mode=ro", uri=True) as conn:
+            exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_records'").fetchone()
+            row = conn.execute("SELECT payload FROM paper_records WHERE kind='risk' AND id='current'").fetchone() if exists else None
+        result["risk"] = json.loads(row[0]) if row else None
     heartbeat = directory / "heartbeat.json"
     if heartbeat.exists():
         result["heartbeat"] = json.loads(heartbeat.read_text())
@@ -218,7 +225,8 @@ def start(config_path, directory, ledger, *, placeholder=False, now=None):
             if result.get("heartbeat", {}).get("pid") == child.pid:
                 if result["ready"]:
                     return result
-                if result["heartbeat"]["state"] == "halted":
+                if (result["heartbeat"]["state"] == "halted"
+                        and (result["heartbeat"].get("risk") or {}).get("kill_switch_active")):
                     raise RuntimeError("H1 startup halted; inspect service.log")
             time.sleep(.1)
         raise RuntimeError("Startup readiness timed out; inspect service.log")
@@ -260,7 +268,7 @@ def heartbeat(directory, value):
     temporary.replace(Path(directory) / "heartbeat.json")
 
 
-def run(config_path, directory, ledger, *, placeholder=False):
+def run(config_path, directory, ledger, *, placeholder=False, action="run", reason=None):
     if datetime.now(timezone.utc) < datetime.fromisoformat(FORWARD_START):
         raise ValueError("Paper service cannot start before 2026-12-19 00:00 UTC")
     import ccxt
@@ -275,20 +283,53 @@ def run(config_path, directory, ledger, *, placeholder=False):
         raise ValueError("H1 requires Freqtrade 2026.10 and ccxt 4.5.90")
     cfg = prepare_config(json.loads(Path(config_path).read_text()), directory, ledger, placeholder=placeholder)
     directory = Path(directory).resolve()
+    if action not in ("run", "reconcile", "reidentify"):
+        raise ValueError("Unknown paper service action")
+    if action != "run":
+        if not (reason and reason.strip()) or not all((directory / name).is_file() for name in ("identity.json", "journal.sqlite", "trades.sqlite")):
+            raise ValueError("Operator recovery requires a reason and existing paper state")
     directory.mkdir(parents=True, exist_ok=True)
     os.umask(0o077)
     logging.basicConfig(level=logging.INFO)
     with (directory / "service.lock").open("a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        stop_event = Event()
-        handlers = {sig: signal.signal(sig, lambda *_: stop_event.set()) for sig in (signal.SIGTERM, signal.SIGINT)}
+        deadline = time.monotonic() + 1
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ValueError("H1 service is already running; stop it before recovery")
+                time.sleep(.01)
         identity = {"selection": cfg["h1_selection"], "rules": cfg["research_h1"],
                     "params": cfg["research_params"], "git_sha": research.git_sha(ROOT)}
         path = directory / "identity.json"
+        if action == "reidentify":
+            previous = json.loads(path.read_text())
+            if {k: v for k, v in previous.items() if k != "git_sha"} != {k: v for k, v in identity.items() if k != "git_sha"}:
+                raise ValueError("Reidentify cannot change selection, strategy, parameters or rules")
+            if previous == identity:
+                raise ValueError("Paper identity is unchanged")
+            now = datetime.now(timezone.utc)
+            receipt = dict(time=now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
+                           observed=now.isoformat(), reason=reason.strip(), previous=previous, new=identity)
+            temporary = directory / "identity.pending"
+            with temporary.open("w") as handle:
+                handle.write(json.dumps(identity, indent=2))
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Commit the audit first; interruption may over-report, never conceal, a code change.
+            with sqlite3.connect(directory / "journal.sqlite") as conn:
+                conn.execute("INSERT INTO paper_records VALUES ('reidentify',?,?)",
+                             (uuid.uuid4().hex, json.dumps(receipt, allow_nan=False)))
+            temporary.replace(path)
+            return receipt
         if path.exists() and json.loads(path.read_text()) != identity:
-            raise ValueError("Paper identity changed; use a separate directory or reconcile explicitly")
+            raise ValueError("Paper identity changed; restore the pinned checkout or reidentify explicitly")
         if not path.exists():
             path.write_text(json.dumps(identity, indent=2))
+        stop_event = Event()
+        handlers = {sig: signal.signal(sig, lambda *_: stop_event.set()) for sig in (signal.SIGTERM, signal.SIGINT)}
         heartbeat(directory, {"state": "starting", "selection": cfg["h1_selection"]})
         cfg.update(runmode=RunMode.DRY_RUN, candle_type_def=CandleType.SPOT, trading_mode=TradingMode.SPOT,
                    _h1_paper_adapter=PAPER_TOKEN)
@@ -296,6 +337,13 @@ def run(config_path, directory, ledger, *, placeholder=False):
         try:
             bot = FreqtradeBot(cfg)
             adapter = PaperAdapter(bot, directory / "journal.sqlite")
+            if action == "reconcile":
+                acquired = datetime.now(timezone.utc)
+                tickers = bot.exchange.get_tickers(bot.active_pair_whitelist, cached=False)
+                prices = {p: {"price": tickers[p]["last"], "asof": (
+                    datetime.fromtimestamp(tickers[p]["timestamp"] / 1000, timezone.utc)
+                    if tickers[p].get("timestamp") else acquired).isoformat()} for p in bot.active_pair_whitelist}
+                return adapter.reset_risk(prices, datetime.now(timezone.utc), reason)
             while not stop_event.is_set():
                 try:
                     batch = tick(adapter)
@@ -309,7 +357,6 @@ def run(config_path, directory, ledger, *, placeholder=False):
                     key = stamp.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
                     if adapter.get("error", key) is None:
                         adapter.save("error", key, {"time": key, "observed": stamp.isoformat(), "error": str(exc)})
-                    adapter.observe({}, datetime.now(timezone.utc))
                     heartbeat(directory, {"state": "halted", "error": str(exc), "risk": adapter.get("risk", "current")})
                 if stop_event.wait(60):
                     break
@@ -324,14 +371,19 @@ def run(config_path, directory, ledger, *, placeholder=False):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("start", "stop", "status", "run"))
+    parser.add_argument("action", choices=("start", "stop", "status", "run", "reconcile", "reidentify"))
     parser.add_argument("--config", default=str(ROOT / "user_data/configs/h1_dryrun.json"))
     parser.add_argument("--directory", default=str(ROOT / "user_data/data/h1-paper"))
     parser.add_argument("--ledger", default=str(ROOT / "user_data/data/trial_ledger.sqlite"))
     parser.add_argument("--placeholder", action="store_true", help="Explicit M45 non-selected test mode; never G2 evidence")
+    parser.add_argument("--reason", help="Required audit reason for reconcile/reidentify")
     args = parser.parse_args()
+    if args.action in ("reconcile", "reidentify") and not (args.reason and args.reason.strip()):
+        parser.error(f"{args.action} requires --reason")
     if args.action in ("status", "stop"):
         result = (status if args.action == "status" else stop)(args.directory)
+    elif args.action in ("reconcile", "reidentify"):
+        result = run(args.config, args.directory, args.ledger, placeholder=args.placeholder, action=args.action, reason=args.reason)
     else:
         result = (start if args.action == "start" else run)(args.config, args.directory, args.ledger, placeholder=args.placeholder)
     if result is not None:
