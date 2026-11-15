@@ -16,6 +16,7 @@ user_data/configs/.*
 # so unlike the instance configs it is committed, not templated (issue #47).
 !user_data/configs/config-freqai-base.json
 !user_data/configs/research-h1.example.json
+!user_data/configs/h1_dryrun.json
 
 # Freqtrade download data
 user_data/data/

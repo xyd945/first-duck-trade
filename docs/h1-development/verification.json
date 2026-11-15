@@ -1,0 +1,152 @@
+{
+  "attempts": 24,
+  "ledger_rows": 24,
+  "verdicts": {
+    "ok": 9,
+    "baseline": 3,
+    "sensitivity": 12
+  },
+  "scored_days": 1083,
+  "snapshot_hash": "ffb658c29d7a0799997a57efbdb6770bdf03f286a6ed1a5de0b8abb4618287d3",
+  "market_code_shas": [
+    "588dcf02abc7db6039e71da59c9950afad3e6002"
+  ],
+  "engine": "2026.10",
+  "ccxt": "4.5.90",
+  "max_daily_nav_reconciliation_error": 1.7462298274040222e-10,
+  "sealed_window_rows": 0,
+  "budget": {
+    "H1": {
+      "trials": 28,
+      "failed": 0,
+      "unfinished": 0,
+      "backtests": 24,
+      "evaluations": 0,
+      "hyperopt_batches": 0,
+      "hyperopt_epochs_requested": 0,
+      "N": 0
+    }
+  },
+  "receipt_hashes": {
+    "4dd61e11c7344cc796166f25cce399db": {
+      "decision-batches.json": "d75a11f62e91db6ae6f17d18d5fc6e59c209c552385f57ce82a5d08fa3cb9ac3",
+      "net-equity.feather": "d722e788a520bc161d9d2b1ef0c87a5f1fc1dbfb3b6bff5d756287e3609b9951",
+      "run.json": "5dae89470ea40091c00153d9b643279790435b2f3b9726048cbede21573746c5"
+    },
+    "f038b8c0cdcd488b8ce86f57b4841037": {
+      "decision-batches.json": "b1b815cad9f3ba70c47dd824cbe482d171d272703439a613eba98fb8ec89fd75",
+      "net-equity.feather": "72fc3d7c9c7859bfa80a6c7e31cbeffbcb538240eda4635623e2486e1bdb7195",
+      "run.json": "1ee6677d60287eb89058b497309a828467cebb173cc9ecc50f35c4cf9a9ab1f1"
+    },
+    "d2a749d6a4624b488ff7f14a0233c7bf": {
+      "decision-batches.json": "ed93c79224f399afbf4591dbb733f77eb12ec37ffdd9c785acc46b824654bc48",
+      "net-equity.feather": "c2ded93017495961a1e43f85666b2addf702a894bb1d4cdf8a90cf0844336717",
+      "run.json": "15f89538c5ef8914d0956f5373e8bd5664a412194432cb7662d5b953542645bb"
+    },
+    "3d58ab1fd88c4d0dbf075161c2b09446": {
+      "decision-batches.json": "bb844da5150bfcc9ccc20fbb6c81b5fb0b3901b670271f9db14c9f2b53b48dc1",
+      "net-equity.feather": "0c58c24c1cfd49e21b7b90063f3daef1b93e485f83fe5b8264754840a05043d9",
+      "run.json": "642eb2448b2b95ce914697e47283aa0c6d915027c481dffb47e744dd3b49df54"
+    },
+    "4886931fffb240febebf66d9115681fa": {
+      "decision-batches.json": "119384b5e066cad1d005807e03d5a8987798daf46377835e965e7743fcf3c2f5",
+      "net-equity.feather": "f1b3cdafb3007478f8084ae25b20a08f1a59d4c3ed1e6de368a95d9b77c993f9",
+      "run.json": "a1a596c328759d95f0afad073172408eac41cece7ad5c59bd285ee689d8b3014"
+    },
+    "fa15a817e81949d7bc699cb53a46ad27": {
+      "decision-batches.json": "8971e06cd59c1b3c850dd334261c5a5b654ae82dbee99847d746c1c85ecf97a3",
+      "net-equity.feather": "726689a8f403319c86cb4898bb142b7c512ac941fe7e571d43d8e598cfbd1a7c",
+      "run.json": "3edfa252d9a378bc69368b9de220fdf828ed436ef65ad561265d3a5df30736fb"
+    },
+    "8aaf9a906c6d42c38f5caeecb32b672b": {
+      "decision-batches.json": "5effab54dfd4e013c8ebf00b5ea734774ae9fccea7bf49637841a1891e090b98",
+      "net-equity.feather": "17e23b8bafba1f7995c789ef272c7f46cb6987c2e0f906804cbc564e90ee0156",
+      "run.json": "c63bff645cd4d808d391079fc37a6b5449263732cc1e0446f09ad7da1a95d30b"
+    },
+    "1b3d05adeafe4fabb72b919676f9738b": {
+      "decision-batches.json": "0ff921ad276a99aeef70c2da4bae1e73d10b93a0180e5d82eba9ef97c605a338",
+      "net-equity.feather": "c8667acfd563b7620c0913bdd448049f60134a497354874e4826467e6664bba9",
+      "run.json": "363acbc88bf782b5cf4ee2316c01e4888e2b067f8f7832117e516b896a845e0c"
+    },
+    "84b5e91189a1476c9c547309eef9e7f9": {
+      "decision-batches.json": "eb9fcbf63461e8a5776f69d64338a00a13ba5c2b2508e8c9d768b7c94c9ef5b1",
+      "net-equity.feather": "ebd339027af07124cc80a2ed5da4895c774728b5c4984bbfde2364f8360f1512",
+      "run.json": "04d78a04a94aa064b59d4d81ab278d4e6bc50dcb0a27dde70c730aec4e79a584"
+    },
+    "eb960d274a2d4358a310ebbd23167ca8": {
+      "decision-batches.json": "8450848a0d2c941d6081053deccfae5d6e70ae2f05b0fc87195d29acf8ea04ee",
+      "net-equity.feather": "6689b5fcb55fd75af04129b48f4c702b5e752ed122b6317d0ff76f998678e6d7",
+      "run.json": "6060e1009c6f79a617d684268b02d3e40a014afb174365a7ad193986b304776f"
+    },
+    "ffed4dbea0db469b81dcdd8edd0bf58c": {
+      "decision-batches.json": "d8c1444b3c5896b3b71a7e135f5ec2dfc3fa88961f7bbbe223cfdc3d12e45ea5",
+      "net-equity.feather": "5d07b9f321bf192f22c6e53450d22063999d43c7b1e88521f8a8396da4bf8642",
+      "run.json": "6fb6f6402d6c14687e8148232268117bedcbe039339fe3fbbbd4aff9b5718e1c"
+    },
+    "b4e699cdd1f64cfebffdcd0b0ac9aec1": {
+      "decision-batches.json": "0a342a5d5ccd352ddae3ab5fb45275a27c6ebaa568203e8f7d4017577534054f",
+      "net-equity.feather": "402f17e6725290ebc9750dafa9dcdc40dc817a154cf91b61044cab8640cb036a",
+      "run.json": "92155ab6049ddb5c40e37ff1509464b5a7a32e6fd36f4701859502013776fecf"
+    },
+    "eedba5424e5645ec8e5fbb03768566e8": {
+      "decision-batches.json": "82b50ef6c2e41551a15d87953f9438f4e717bb952a08bcf9722d549a23ef29a1",
+      "net-equity.feather": "7b65cd7152eb78ce446cb5380ac8a2d6fa67006dfa5a6e5555cf045c7e0267db",
+      "run.json": "0c3e653579e866a801fd86a02cc5c3baac175ce7043ff400d2cb79a68cca106f"
+    },
+    "e9dc0e86921048f19bcc0c92ce1ac59d": {
+      "decision-batches.json": "2e5c657b127fb316968adf725d84a5dcfe1a17b980c5022344c07842d24de8b5",
+      "net-equity.feather": "a9bd05214597966495bc517dc34a4f3359042fb28203d39a593372e744a9ebfc",
+      "run.json": "8fc2b346fd0af7c3ec16def301b0593dfb8148ddf8636592f1519f040ed10c47"
+    },
+    "84e8d715c3834b408441a321c15a3bae": {
+      "decision-batches.json": "f1f3925d5fcf06c4e5ba051fb1e88e2f2fb40f5dc83a4ed3180821bdab3573f5",
+      "net-equity.feather": "a05657d5afe2ede5c15682d9f6de5a1f9dca825bef19efc29fcbbbe67c2111c4",
+      "run.json": "766727fdfeaa9e7d7714c4113b5fbcf5d79388dcd43beec2e035295d07a2826b"
+    },
+    "17d9d869beca4c21899481b299afef36": {
+      "decision-batches.json": "6df7b72c8c4d2320237c9fcafbd40009e0439aea384d9978512ed26e338de1b2",
+      "net-equity.feather": "2eea895f4a13e73e62d25d05fb091492956600393153110d2a1057bfc73043cc",
+      "run.json": "d608129400c5c3d198e166855939082bcf670bb1399c452144120e68a3eb5cbb"
+    },
+    "f421c132bdb7439f85314cfe07313fdb": {
+      "decision-batches.json": "206ab9071db1975b33e9d7821862907bc0a7734bffbdad6bb7a38f1791720288",
+      "net-equity.feather": "742ca1988e5b96cde50a69bba2f42dc064a2fe468328ff6869c0e39f65ebf92b",
+      "run.json": "57f849d9075db12f7702547e7c9cd9e70b1e32a7ea3c5b58b0690cbc4782d711"
+    },
+    "2894e5e83e6241acab0fc5274958198e": {
+      "decision-batches.json": "65f5d4354990ffcbf810ea7f2c3219f1047ae7f3fcf2ee8182c03cb8224b1da7",
+      "net-equity.feather": "ae1f214e2326ab08cfff0ba239fab6c674a776fcca34b6eaa0079987e7a47a54",
+      "run.json": "1aec14d6af2923e60a765fa06bc766d6444375cd1f9da0f08a857c92be72eb3a"
+    },
+    "e0089686cf1a437f9375ca175207fd80": {
+      "decision-batches.json": "ee56609c65e0da3edb77ef26c37732cdd578919fa899b482f4b1ea2aa1aad1b6",
+      "net-equity.feather": "1bfdf7dde1a21f898829dac412642996bdc3ff6371e54281a7c0556b15581db7",
+      "run.json": "9becbbe81c01c340db8f568e0aad2c78cf66c1ec09c308809bf801a319e423ce"
+    },
+    "92b65699ca0e4621aba7391f6a6d91f6": {
+      "decision-batches.json": "935595162d72e80bcb2f93975e5510f81a0bba38dfc8e23d5637e03982533488",
+      "net-equity.feather": "46cf9c34739cfe3bc669cb4d255da11ded444caf483bea75eabe52aa8677bf80",
+      "run.json": "b55ee25e145b61f10c63e7d8e54053c7383aa0a12e9267b05947615acb5a7660"
+    },
+    "9ddca2fe6a9641189dde98b04f9d1a19": {
+      "decision-batches.json": "031a3030c22840018155c02baa8199b638bcb6544b3b50644e540488f17add7f",
+      "net-equity.feather": "263d9469391e3e680d4fcd34d1ccbfa904314bf5ab1bba95f8a2a75c50383170",
+      "run.json": "5ccbd6e89d7da8eabb1e32a0cc232ddf87e8f4e125a9457a2b60a4ec9d86bd0f"
+    },
+    "e0465fb243544b01a43fe44e12e03bb7": {
+      "decision-batches.json": "5e670ee1023c8f7699faee7f695c0b1c9c76fd6f4e22e7480f0af3ccf8a20ec1",
+      "net-equity.feather": "50ab79654ff739a7d00e0fd17c946b0bb806927d2ab98de9a7d57a7c6a0a5567",
+      "run.json": "93fc4d450a68bab0f9ac091841d1e0511159b2b76d8ebf8cc1e74112cafd6029"
+    },
+    "5a49ae95c8a849c0bcb274785e195463": {
+      "decision-batches.json": "d416e4c49e46a166bfd96ca9864cedb2e87ee1c3c938755017e06dbf34a4317f",
+      "net-equity.feather": "9e070a2c4af36bcf4f8c916550945435e9a766e60abde568e6c774883afd1b4e",
+      "run.json": "5595d3558653275c2cdf4a5d33817efabcc36e34398b0667e918dbfa082956d7"
+    },
+    "0f72e91c46de48b3a0c3271ff9b27458": {
+      "decision-batches.json": "652a654e4420edb43edca5f0ffe257ef30ad2c015a0f0a00a38797f9b6240d86",
+      "net-equity.feather": "77ade167ca7fd3847b6c10929eaade41238bee113515cff95581bf96f3de3d35",
+      "run.json": "e099539c671adc0970a95d39f73b6966a7b22652d733f60283656a24d292e694"
+    }
+  }
+}

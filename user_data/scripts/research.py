@@ -469,6 +469,12 @@ def describe_run(base, policy, strategy, timeframe, config_path=None, freqai_mod
         if (base / matches[0]).with_suffix(".json").exists():
             raise ValueError("H1 uses registered params, not hidden hyperopt sidecars")
     engine_config["research_params"] = params
+    if "h1" in policy:
+        engine_config["research_h1"] = policy["h1"]
+        for filename in ("h1_backtest.py", "research.py", "accounting.py", "paper_risk.py"):
+            source = base / "scripts" / filename
+            if source.exists():
+                code[f"scripts/{filename}"] = file_hash(source)
     hash_params = {k: params[k] for k in ("ladder", "sigma_target", "vol_window", "rebalance_band")}
     source_bytes = (base / matches[0]).read_bytes()
     digest = hashlib.sha256(source_bytes + json.dumps(
@@ -500,7 +506,8 @@ def prepare_run(base, policy, descriptor, engine_config, trial_id, timerange, sp
     manifest_path = Path(snapshot["manifest"])
     manifest = verify_snapshot(manifest_path, snapshot["hash"])
     expected_end = policy["splits"]["eval" if split == "eval" else "selection"][1]
-    if manifest["window_start"] != policy["warmup"][0] or manifest["window_end"] != expected_end:
+    accepted_ends = {expected_end, policy["splits"]["dev"][1]} if split == "dev" else {expected_end}
+    if manifest["window_start"] != policy["warmup"][0] or manifest["window_end"] not in accepted_ends:
         raise ValueError("Snapshot window does not match the configured split policy")
     if split == "eval":
         s1 = policy["snapshots"]["S1"]
@@ -531,8 +538,9 @@ def slice_result(result, strategy, timerange, path_timerange, run_dir):
         for name in archive.namelist():
             if name.endswith(".json"):
                 payload = json.loads(archive.read(name))
-                if strategy in payload.get("strategy", {}):
-                    summaries.append(payload["strategy"][strategy])
+                strategies = payload.get("strategy", {})
+                if isinstance(strategies, dict) and strategy in strategies:
+                    summaries.append(strategies[strategy])
         wallets = [n for n in archive.namelist() if n.endswith(f"_{strategy}_wallet.feather")]
         if len(summaries) != 1 or len(wallets) != 1:
             raise ValueError("A continuous-path result and wallet export are required")
@@ -564,6 +572,9 @@ def slice_result(result, strategy, timerange, path_timerange, run_dir):
     config = json.loads((run_dir / "config.json").read_text())
     initial = config["dry_run_wallet"]
     fills = freqtrade_fills(summary["trades"], right - timedelta(days=1))
+    if "research_h1" in config:
+        # Minified exports group by trade, losing the H1 adapter's same-open sell-first ordering.
+        fills.sort(key=lambda fill: (fill["date"], fill["side"] == "buy", fill["pair"]))
     marks = pd.DataFrame(index=pd.date_range(left, right - timedelta(days=1), freq="D"))
     for pair in config["exchange"]["pair_whitelist"]:
         frame = pd.read_feather(run_dir / "data" / f"{pair.replace('/', '_')}-1d.feather")
