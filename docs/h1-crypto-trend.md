@@ -1,6 +1,6 @@
 # H1 crypto trend: strategies, execution adapter and tests
 
-The registered specification is G0 H1 (Quant desk, "G0 H1 crypto trend"). This code implements it for historical development runs only. It does not start a bot, a dry-run or a scheduler, and it has no selection or evaluation entry point.
+The registered specification is G0 H1 (Quant desk, "G0 H1 crypto trend"). The historical runner remains development-only. The separate isolated paper service and weekly comparison are documented in [H1 paper readiness](h1-paper-readiness.md); they do not authorise launch or expose a selection/evaluation runner.
 
 ## Files
 
@@ -35,7 +35,7 @@ The engine tests use offline OKX market metadata and synthetic prices; they make
 
 The completed development evidence is in [h1-development/README.md](h1-development/README.md): 24 market ledger rows, gate/base results, data hashes and reconciliation receipts. No selection or evaluation window ran.
 
-The keyless config is `user_data/configs/h1_dryrun.json`. It passes `show-config` and the strict dry-run schema but remains **not start-ready**: M45 is a placeholder and paper activation is deliberately refused. G0 approval, the actual selection, a paper execution adapter and reconciled risk inputs are still required. No service was added or started. Bybit is not runnable on the registered pairs; see [the venue report](h1-venue-check.md).
+The keyless config is `user_data/configs/h1_dryrun.json`. It passes `show-config` and the strict dry-run schema. M45 remains a placeholder, not a selected configuration. The isolated adapter/service now supplies reconciled risk inputs and tested execution, but launch still requires G0 approval, the actual selection and Yudi's approval of the notional mapping. No public-data service was started. Bybit is not runnable on the registered pairs; see [the venue report](h1-venue-check.md).
 
 ### Individual development run
 
@@ -61,6 +61,6 @@ Baselines take `--strategy H1SimpleTrend|H1EqualWeight|H1BuyHold` and no `--conf
 11. **Equal-weight baseline.** `1/N_t` in every eligible coin, resized only on Monday with the 2.5% band. A change in `N_t` takes effect at the next Monday.
 12. **Ledger.** `H1Trend` rows have verdict `ok`; an identical repeat becomes `rerun`. Baseline rows have verdict `baseline`, including repeats. Baselines share `H1Trend.py` and the default params, so their `config_hash` equals the matching H1 configuration's; `verdict` and `params_json.config.strategy` tell them apart. Neither affects N.
 13. **Development snapshot.** A dev run accepts a snapshot ending at the development end (2021-12-31) as well as at the S1 end, so building does not need selection-window bars on disk.
-14. **Paper limits.** Fix-4 `paper_risk.evaluate(...)` gates buys in paper modes only. The 250,000 `designated_portfolio_notional` is recorded in the policy as "pending Yudi's OK" but not read by code: fix 4 requires the risk state to be initialised with explicit reconciled values, with no default capital. `bot_start` refuses every run mode except a backtest under the logged historical adapter, so paper activation is disabled. In paper mode a batch waits while any sell is pending and expires at the next daily decision. Historical research runs are not capped by the paper-phase limits.
+14. **Paper limits.** Fix-4 `paper_risk.evaluate(...)` gates buys in paper modes only. The isolated service reads the single explicit 250,000 `designated_portfolio_notional`, still "pending Yudi's OK", to initialise its reconciled paper reserve mapping. `bot_start` accepts only the logged historical adapter or the in-process verified dry-run service token; live mode remains refused. Paper batches wait for settled sells and expire at the next daily decision. Historical research runs are not capped by paper-phase limits.
 15. **Bybit cost check.** Not runnable on registered pairs: Bybit EU lists USDC and EUR pairs only, with history from 2025-06-11. No substitute market is used.
 16. **Export replay.** Freqtrade's minified export groups orders by trade, which loses same-open ordering. When replaying an H1 export, `research.slice_result` orders fills on the same date sells first, matching the adapter.

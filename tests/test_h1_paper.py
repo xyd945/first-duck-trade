@@ -199,7 +199,8 @@ def test_market_depth_is_budgeted_before_common_factor_buy(paper_bot, tmp_path, 
     assert all(q < 25. for q in batch["holdings"].values())
 
 
-def test_service_tick_persists_confirmed_data_and_one_daily_batch(paper_bot, tmp_path, clock, monkeypatch):
+@pytest.fixture
+def service_tick(paper_bot, tmp_path, clock, monkeypatch):
     import numpy as np
     import h1_service
     from h1_paper import PaperAdapter
@@ -214,12 +215,97 @@ def test_service_tick_persists_confirmed_data_and_one_daily_batch(paper_bot, tmp
     bot.dataprovider.ohlcv = Mock(return_value=frame)
     bot.exchange._api.fetch_ohlcv = Mock(return_value=[[int(now.timestamp()*1000), 100., 100., 100., 100., 1.]])
     adapter = PaperAdapter(bot, tmp_path / "journal.sqlite")
+    return adapter, frame
+
+
+def test_service_tick_persists_confirmed_data_and_one_daily_batch(service_tick, tmp_path, clock):
+    import h1_service
+    adapter, frame = service_tick
+    now = pd.Timestamp(clock.current)
     batch = h1_service.tick(adapter)
     assert batch["time"] == now.isoformat()
     assert len(batch["target_weights"]) == 4
     assert len(list((tmp_path / "data").glob("*.feather"))) == 4
     assert adapter.get("reference", now.isoformat())["BTC/USDT"] == 100.
     assert h1_service.tick(adapter) == batch
+
+
+def test_late_day_is_terminal_but_keeps_prior_nav_and_next_day_running(service_tick, clock):
+    import h1_service
+    adapter, frame = service_tick
+    clock.current = datetime(2026, 12, 20, 0, 6, tzinfo=timezone.utc)
+    frame = pd.concat([frame, frame.iloc[[-1]].assign(date=pd.Timestamp("2026-12-19", tz="UTC"))], ignore_index=True)
+    adapter.bot.dataprovider.ohlcv.return_value = frame
+    adapter.bot.exchange._api.fetch_ohlcv.side_effect = lambda *a, **kw: [[kw["since"], 100., 100., 100., 100., 1.]]
+    first = h1_service.tick(adapter)
+    assert first["status"] == "missed"
+    assert adapter.get("nav", "2026-12-19T00:00:00+00:00")["equity"] == 10000.
+    clock.current = datetime(2026, 12, 21, 0, 1, tzinfo=timezone.utc)
+    adapter.bot.dataprovider.ohlcv.return_value = pd.concat([
+        frame, frame.iloc[[-1]].assign(date=pd.Timestamp("2026-12-20", tz="UTC"))], ignore_index=True)
+    assert h1_service.tick(adapter)["time"] == "2026-12-21T00:00:00+00:00"
+    assert adapter.get("batch", first["time"]) == first
+
+
+def test_delayed_candle_retries_without_fabricating_nav(service_tick, clock):
+    import h1_service
+    adapter, frame = service_tick
+    clock.current = datetime(2026, 12, 20, tzinfo=timezone.utc)
+    adapter.bot.exchange._api.fetch_ohlcv.side_effect = lambda *a, **kw: [[kw["since"], 100., 100., 100., 100., 1.]]
+    batch = h1_service.tick(adapter)
+    assert batch["status"] == "waiting_data"
+    assert adapter.get("nav", "2026-12-19T00:00:00+00:00") is None
+    assert not Trade.get_trades_proxy()
+    clock.current += pd.Timedelta(minutes=1)
+    adapter.bot.dataprovider.ohlcv.return_value = pd.concat([
+        frame, frame.iloc[[-1]].assign(date=pd.Timestamp("2026-12-19", tz="UTC"))], ignore_index=True)
+    assert h1_service.tick(adapter)["status"] == "finished"
+    assert adapter.get("nav", "2026-12-19T00:00:00+00:00")["equity"] == 10000.
+
+
+def test_late_service_tick_still_expires_previous_pending_sale(service_tick, clock, monkeypatch):
+    import h1_service
+    adapter, frame = service_tick
+    bot, first = adapter.bot, clock.current
+    adapter.observe(quotes(bot, first), first)
+    enter(bot, "ETH/USDT", 20, first)
+    create = bot.exchange.create_order
+    def pending_sale(**kwargs):
+        result = create(**kwargs)
+        if kwargs["side"] == "sell":
+            result.update(status="open", filled=0., remaining=result["amount"], fee=None)
+        return result
+    monkeypatch.setattr(bot.exchange, "create_order", pending_sale)
+    assert adapter.step(rows(bot, {"BTC/USDT": .2}), quotes(bot, first), first)["status"] == "selling"
+    clock.current += pd.Timedelta(days=1, minutes=6)
+    bot.dataprovider.ohlcv.return_value = pd.concat([
+        frame, frame.iloc[[-1]].assign(date=pd.Timestamp("2026-12-19", tz="UTC"))], ignore_index=True)
+    assert h1_service.tick(adapter)["status"] == "missed"
+    assert adapter.get("batch", first.isoformat())["status"] == "expired"
+    assert not any(t.open_orders for t in Trade.get_open_trades())
+
+
+def test_reference_fetch_cannot_cross_the_decision_deadline(service_tick, clock):
+    import h1_service
+    adapter, frame = service_tick
+    clock.current += pd.Timedelta(minutes=4, seconds=59)
+    def reference(*args, **kwargs):
+        clock.current += pd.Timedelta(seconds=1)
+        return [[kwargs["since"], 100., 100., 100., 100., 1.]]
+    adapter.bot.exchange._api.fetch_ohlcv.side_effect = reference
+    assert h1_service.tick(adapter)["status"] == "missed"
+    assert not Trade.get_trades_proxy()
+
+
+def test_future_ticker_is_not_clipped_to_a_fresh_quote(service_tick, clock):
+    import h1_service
+    adapter, frame = service_tick
+    for ticker in adapter.bot.exchange.get_tickers.return_value.values():
+        ticker["timestamp"] = (clock.current + pd.Timedelta(minutes=1)).timestamp() * 1000
+    batch = h1_service.tick(adapter)
+    assert batch["status"] == "blocked"
+    assert adapter.get("risk", "current")["kill_switch_active"]
+    assert not Trade.get_trades_proxy()
 
 
 def test_wallet_refresh_finishes_after_tick_acquisition_time(paper_bot, tmp_path, clock, monkeypatch):
@@ -233,9 +319,3 @@ def test_wallet_refresh_finishes_after_tick_acquisition_time(paper_bot, tmp_path
     batch = PaperAdapter(bot, tmp_path / "journal.sqlite").step(rows(bot, {"BTC/USDT": .1}), quotes(bot, now), now)
     assert batch["holdings"]["BTC/USDT"] > 0
     assert batch["risk_scale"] == 1.
-
-
-
-
-
-

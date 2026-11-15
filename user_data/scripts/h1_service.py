@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parents[2]
 PAPER_TOKEN = object()
 FORWARD_START = "2026-12-19T00:00:00+00:00"
+STARTUP_TIMEOUT = 300
+STOP_TIMEOUT = 30
 
 
 def strategy_hash(params):
@@ -45,7 +47,12 @@ def prepare_config(config, directory, ledger, *, placeholder=False):
         raise ValueError("Only keyless OKX public spot data is allowed")
     if any(cfg["order_types"].get(k) != "market" for k in ("entry", "exit", "stoploss")) or cfg["order_types"]["stoploss_on_exchange"]:
         raise ValueError("H1 requires simulated market orders")
-    if cfg["research_h1"]["designated_portfolio_notional"] < 10000:
+    rules = json.loads((ROOT / "user_data/configs/research-h1.example.json").read_text())["h1"]
+    variable = {"designated_portfolio_notional", "paper_mapping_status"}
+    if {k: v for k, v in cfg["research_h1"].items() if k not in variable} != {k: v for k, v in rules.items() if k not in variable}:
+        raise ValueError("H1 registered rules cannot be overridden")
+    from accounting import number
+    if number(cfg["research_h1"]["designated_portfolio_notional"], "designated notional", positive=True) < 10000:
         raise ValueError("Designated paper notional cannot be below the wallet")
     if placeholder:
         cfg["research_params"] = {"ladder": [20, 60, 180], "sigma_target": .45,
@@ -89,6 +96,7 @@ def tick(adapter):
     day = pd.Timestamp(acquired).floor("D")
     if acquired < datetime.fromisoformat(FORWARD_START):
         raise ValueError("Paper service cannot start before 2026-12-19 00:00 UTC")
+    adapter.expire(day)
     tickers = bot.exchange.get_tickers(bot.active_pair_whitelist, cached=False)
     fetch_book = bot.exchange.fetch_l2_order_book
     books = {p: fetch_book(p, 20) for p in bot.active_pair_whitelist}
@@ -97,12 +105,14 @@ def tick(adapter):
         ticker = tickers[pair]
         stamp = acquired
         if ticker.get("timestamp"):
-            stamp = min(stamp, datetime.fromtimestamp(ticker["timestamp"] / 1000, timezone.utc))
+            stamp = datetime.fromtimestamp(ticker["timestamp"] / 1000, timezone.utc)
         prices[pair] = {"price": number(ticker["last"], "mark", positive=True), "asof": stamp.isoformat(),
                         "buy_price": max(number(v[0], "ask", positive=True) for v in books[pair]["asks"]),
                         "sell_price": min(number(v[0], "bid", positive=True) for v in books[pair]["bids"])}
     existing = adapter.get("batch", day.isoformat())
-    if existing and existing["status"] in ("finished", "blocked", "missed"):
+    previous = (day - pd.Timedelta(days=1)).isoformat()
+    terminal = existing and existing["status"] in ("finished", "blocked", "missed", "error")
+    if terminal and (day == pd.Timestamp(FORWARD_START) or adapter.get("nav", previous)):
         adapter.observe(prices, datetime.now(timezone.utc))
         return existing
     bot.dataprovider.refresh(bot.pairlists.create_pair_list(bot.active_pair_whitelist), [])
@@ -126,7 +136,18 @@ def tick(adapter):
         temporary.replace(path)
         data[pair] = latest
     rows = decision_rows(bot.strategy, data, day)
-    if adapter.get("reference", day.isoformat()) is None:
+    now = datetime.now(timezone.utc)
+    if pd.Timestamp(now).floor("D") != day:
+        raise ValueError("Daily boundary crossed during acquisition")
+    snapshot, state = adapter.observe(prices, now)
+    complete = all(r["date"] == day - pd.Timedelta(days=1) and r["can_trade"] for r in rows.values())
+    if snapshot and complete and day > pd.Timestamp(FORWARD_START) and not adapter.get("nav", previous):
+        account = snapshot["accounts"][0]
+        equity = account["cash"] + sum(p["quantity"] * rows[p["pair"]]["close"] for p in account["positions"])
+        adapter.save("nav", previous, {"date": previous, "equity": equity})
+    if terminal:
+        return existing
+    if complete and (now - day).total_seconds() <= 300 and adapter.get("reference", day.isoformat()) is None:
         reference = {}
         for pair in bot.active_pair_whitelist:
             candle = bot.exchange._api.fetch_ohlcv(pair, "1d", since=int(day.timestamp() * 1000), limit=1)
@@ -137,19 +158,15 @@ def tick(adapter):
     now = datetime.now(timezone.utc)
     if pd.Timestamp(now).floor("D") != day:
         raise ValueError("Daily boundary crossed during acquisition")
-    if not existing and (now - day).total_seconds() > 300:
-        batch = dict(time=day.isoformat(), status="missed", divergence=True, risk_reason="late daily decision",
-                     target_weights={p: float(r["target_weight"]) if pd.notna(r["target_weight"]) else None for p, r in rows.items()})
-        adapter.save("batch", day.isoformat(), batch)
-        adapter.observe(prices, now)
-        return batch
-    snapshot, state = adapter.observe(prices, now)
-    if snapshot and day > pd.Timestamp(FORWARD_START):
-        account = snapshot["accounts"][0]
-        equity = account["cash"] + sum(p["quantity"] * rows[p["pair"]]["close"] for p in account["positions"])
-        previous = (day - pd.Timedelta(days=1)).isoformat()
-        if adapter.get("nav", previous) is None:
-            adapter.save("nav", previous, {"date": previous, "equity": equity})
+    if existing is None or existing["status"] == "waiting_data":
+        late = (now - day).total_seconds() > 300
+        if late or not complete:
+            batch = dict(time=day.isoformat(), status="missed" if late else "waiting_data", divergence=True,
+                         risk_reason="late daily decision" if late else "waiting for confirmed prior-day candles",
+                         target_weights={p: float(r["target_weight"]) if pd.notna(r["target_weight"]) else None for p, r in rows.items()})
+            adapter.save("batch", day.isoformat(), batch)
+            return batch
+
     # Pin one observed book per tick so market-fill simulation cannot outrun its cash budget.
     bot.exchange.fetch_l2_order_book = lambda pair, *a, **kw: books[pair]
     try:
@@ -174,6 +191,7 @@ def status(directory):
         result["heartbeat"] = json.loads(heartbeat.read_text())
         stamp = datetime.fromisoformat(result["heartbeat"]["asof"])
         result["heartbeat_fresh"] = 0 <= (datetime.now(timezone.utc) - stamp).total_seconds() <= 300
+    result["ready"] = running and result.get("heartbeat_fresh", False) and result.get("heartbeat", {}).get("state") == "ready"
     return result
 
 
@@ -191,14 +209,29 @@ def start(config_path, directory, ledger, *, placeholder=False, now=None):
         command.append("--placeholder")
     with (Path(directory) / "service.log").open("a") as log:
         child = subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True, cwd=ROOT)
-    for _ in range(100):
-        result = status(directory)
-        if child.poll() is not None:
-            raise RuntimeError("H1 child exited; inspect service.log")
-        if result["running"] and result.get("heartbeat", {}).get("pid") == child.pid:
-            return result
-        time.sleep(.1)
-    raise RuntimeError(f"Startup not confirmed; inspect status and service.log (pid {child.pid})")
+    try:
+        deadline = time.monotonic() + STARTUP_TIMEOUT
+        while time.monotonic() < deadline:
+            result = status(directory)
+            if child.poll() is not None:
+                raise RuntimeError("H1 child exited; inspect service.log")
+            if result.get("heartbeat", {}).get("pid") == child.pid:
+                if result["ready"]:
+                    return result
+                if result["heartbeat"]["state"] == "halted":
+                    raise RuntimeError("H1 startup halted; inspect service.log")
+            time.sleep(.1)
+        raise RuntimeError("Startup readiness timed out; inspect service.log")
+    except BaseException:
+        # A failed start must not leave a child that can begin trading later.
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=STOP_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=STOP_TIMEOUT)
+        raise
 
 
 def stop(directory):
@@ -212,7 +245,8 @@ def stop(directory):
     if str(Path(__file__).resolve()) not in command or str(Path(directory).resolve()) not in command:
         raise ValueError("PID identity changed; refusing to signal another process")
     os.kill(pid, signal.SIGTERM)
-    for _ in range(300):
+    deadline = time.monotonic() + STOP_TIMEOUT
+    while time.monotonic() < deadline:
         if not (result := status(directory))["running"]:
             return result
         time.sleep(.1)
@@ -266,10 +300,15 @@ def run(config_path, directory, ledger, *, placeholder=False):
                 try:
                     batch = tick(adapter)
                     state = adapter.get("risk", "current")
-                    heartbeat(directory, {"state": "running", "batch": batch["time"], "batch_status": batch["status"],
+                    health = "waiting" if batch["status"] == "waiting_data" else ("ready" if state["allow_new_exposure"] else "halted")
+                    heartbeat(directory, {"state": health, "batch": batch["time"], "batch_status": batch["status"],
                                           "risk": state, "selection": cfg["h1_selection"]})
                 except Exception as exc:
                     logging.exception("H1 tick failed closed")
+                    stamp = datetime.now(timezone.utc)
+                    key = stamp.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                    if adapter.get("error", key) is None:
+                        adapter.save("error", key, {"time": key, "observed": stamp.isoformat(), "error": str(exc)})
                     adapter.observe({}, datetime.now(timezone.utc))
                     heartbeat(directory, {"state": "halted", "error": str(exc), "risk": adapter.get("risk", "current")})
                 if stop_event.wait(60):
@@ -304,5 +343,3 @@ if __name__ == "__main__":
     # Keep the identity token singular when this file is executed as a script.
     sys.modules["h1_service"] = sys.modules[__name__]
     raise SystemExit(main())
-
-

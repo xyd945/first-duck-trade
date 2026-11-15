@@ -7,7 +7,7 @@ def test_compare_counts_missing_and_blocked_days_as_mismatches():
     from h1_replay import compare
     expected = [{"time": f"2021-12-{day:02d}T00:00:00+00:00", "target_weights": {"BTC/USDT": .2}}
                 for day in range(1, 5)]
-    actual = [{**row, "risk_scale": 1.} for row in expected[:3]]
+    actual = [{**row, "status": "finished", "risk_scale": 1.} for row in expected[:3]]
     actual[0]["target_weights"] = {"BTC/USDT": .204}
     actual[1]["target_weights"] = {"BTC/USDT": .206}
     actual[2]["risk_scale"] = 0.
@@ -16,6 +16,23 @@ def test_compare_counts_missing_and_blocked_days_as_mismatches():
     assert report["total"] == 4
     assert report["match_percent"] == 25.
     assert not report["pass"]
+
+
+@pytest.mark.parametrize("status", ["error", "missed", "expired", "blocked", "selling", "buying", "waiting", None])
+def test_failed_or_unfinished_decisions_never_match_even_with_correct_targets(status):
+    from h1_replay import compare
+    expected = [{"time": "2026-12-19T00:00:00+00:00", "target_weights": {"BTC/USDT": .2}}]
+    result = compare([{**expected[0], "status": status}], expected, ["BTC/USDT"])
+    assert result["total"] == 1
+    assert result["matched"] == 0
+    assert result["details"][0]["status"] == status
+
+
+def test_allowed_risk_reason_does_not_veto_matching_targets():
+    from h1_replay import compare
+    expected = [{"time": "2026-12-19T00:00:00+00:00", "target_weights": {"BTC/USDT": .2}}]
+    result = compare([{**expected[0], "status": "finished", "risk_scale": 1., "risk_reason": "ok"}], expected, ["BTC/USDT"])
+    assert result["matched"] == 1
 
 
 def test_real_dry_run_replay_matches_backtest_targets(tmp_path):
@@ -36,4 +53,3 @@ def test_real_dry_run_replay_matches_backtest_targets(tmp_path):
     assert report["paper_order_count"] > 0
     assert report["paper_runmode"] == "dry_run"
     assert report["days"] == 22
-

@@ -131,7 +131,7 @@ class PaperAdapter:
             previous = [json.loads(row[0]) for row in conn.execute(
                 "SELECT payload FROM paper_records WHERE kind='batch' AND id < ?", (day.isoformat(),))]
         for batch in previous:
-            if batch["status"] in ("finished", "expired"):
+            if batch["status"] not in ("selling", "buying", "waiting"):
                 continue
             for trade in Trade.get_open_trades():
                 for order in list(trade.open_orders):
@@ -164,7 +164,7 @@ class PaperAdapter:
             return batch
         account = snapshot["accounts"][0]
         holdings = {p["pair"]: p["quantity"] for p in account["positions"]}
-        if batch is None or batch["status"] == "blocked":
+        if batch is None or batch["status"] in ("blocked", "waiting_data"):
             batch = self.bot.strategy.plan_batch(day, rows, holdings, account["cash"])
             batch.update(time=key, status="selling", attempted=[],
                          target_weights={p: float(r["target_weight"]) if pd.notna(r["target_weight"]) else None
@@ -225,4 +225,3 @@ class PaperAdapter:
             batch.update(status="waiting", risk_reason=state["reason"], divergence=True)
         self.save("batch", key, batch)
         return batch
-

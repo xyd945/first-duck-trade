@@ -34,9 +34,10 @@ def test_service_refuses_execution_contract_drift(tmp_path, change):
         prepare_config(cfg, tmp_path, tmp_path / "ledger.sqlite", placeholder=True)
 
 
-def test_dryrun_strategy_requires_in_process_verified_adapter_token(tmp_path):
+def test_dryrun_strategy_requires_in_process_verified_adapter_token(tmp_path, monkeypatch):
     pytest.importorskip("freqtrade")
     from freqtrade.enums import RunMode
+    monkeypatch.syspath_prepend(str(ROOT / "user_data/strategies/candidates"))
     from H1Trend import H1Trend
     from h1_service import prepare_config, PAPER_TOKEN
     cfg = prepare_config(config(), tmp_path, tmp_path / "ledger.sqlite", placeholder=True)
@@ -67,6 +68,23 @@ def test_selected_row_controls_params_and_rejects_changed_source(tmp_path):
         conn.execute("UPDATE trial_ledger SET config_hash='changed' WHERE trial_id=?", (trial,))
     with pytest.raises(ValueError, match="changed"):
         prepare_config(cfg, tmp_path, os.environ["TRIAL_LEDGER_PATH"])
+
+
+@pytest.mark.parametrize("key,value", [("rebalance_weekday", 1), ("minimum_bars", 1),
+                                           ("paper_startup", 365), ("annualisation_days", 252)])
+def test_service_refuses_registered_rule_drift(tmp_path, key, value):
+    from h1_service import prepare_config
+    cfg = config()
+    cfg["research_h1"][key] = value
+    with pytest.raises(ValueError, match="registered rules"):
+        prepare_config(cfg, tmp_path, tmp_path / "ledger.sqlite", placeholder=True)
+
+
+def test_service_allows_one_explicit_pending_notional_change(tmp_path):
+    from h1_service import prepare_config
+    cfg = config()
+    cfg["research_h1"]["designated_portfolio_notional"] = 100000
+    assert prepare_config(cfg, tmp_path, tmp_path / "ledger.sqlite", placeholder=True)["research_h1"]["designated_portfolio_notional"] == 100000
 
 
 def test_service_status_does_not_create_runtime_or_start_a_bot(tmp_path):
@@ -111,4 +129,89 @@ def test_run_refuses_before_forward_date_without_constructing_bot(tmp_path, monk
     assert not (tmp_path / "trades.sqlite").exists()
 
 
+@pytest.fixture
+def offline_service(tmp_path, monkeypatch):
+    pytest.importorskip("freqtrade")
+    import h1_service
+    import subprocess
+    from datetime import datetime, timezone
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 12, 19, 0, 4, tzinfo=timezone.utc)
+    monkeypatch.setattr(h1_service, "datetime", Clock)
+    original = subprocess.Popen
+    children = []
+    mode = ["ready"]
+    def spawn(command, **kwargs):
+        if str(ROOT / "user_data/scripts/h1_service.py") not in command:
+            return original(command, **kwargs)
+        child = original([command[0], str(ROOT / "tests/fixtures/h1_service_offline.py"), mode[0], *command[1:]], **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(h1_service.subprocess, "Popen", spawn)
+    yield h1_service, mode, children
+    for child in children:
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=3)
 
+
+def test_offline_start_waits_for_ready_and_stop_releases_lock(offline_service, tmp_path):
+    service, mode, children = offline_service
+    directory = tmp_path / "paper"
+    result = service.start(ROOT / "user_data/configs/h1_dryrun.json", directory, tmp_path / "ledger", placeholder=True)
+    assert result["ready"] is True
+    assert result["heartbeat"]["state"] == "ready"
+    assert (directory / "trades.sqlite").exists()
+    assert (directory / "journal.sqlite").exists()
+    with pytest.raises(ValueError, match="already running"):
+        service.start(ROOT / "user_data/configs/h1_dryrun.json", directory, tmp_path / "ledger", placeholder=True)
+    assert service.stop(directory)["running"] is False
+    children[0].wait(timeout=3)
+    assert service.status(directory)["ready"] is False
+    assert service.status(directory)["heartbeat"]["state"] == "stopped"
+
+
+@pytest.mark.parametrize("mode_name", ["exit", "tick-error", "entry-error", "hang"])
+def test_failed_start_reaps_only_its_child(offline_service, tmp_path, monkeypatch, mode_name):
+    service, mode, children = offline_service
+    mode[0] = mode_name
+    monkeypatch.setattr(service, "STARTUP_TIMEOUT", 1.5, raising=False)
+    monkeypatch.setattr(service, "STOP_TIMEOUT", .3, raising=False)
+    with pytest.raises(RuntimeError):
+        service.start(ROOT / "user_data/configs/h1_dryrun.json", tmp_path, tmp_path / "ledger", placeholder=True)
+    assert children[0].poll() is not None
+    assert service.status(tmp_path)["running"] is False
+    if mode_name in ("tick-error", "entry-error"):
+        import sqlite3
+        with sqlite3.connect(tmp_path / "journal.sqlite") as conn:
+            record = conn.execute("SELECT payload FROM paper_records WHERE kind='error'").fetchone()
+        assert record is not None
+        assert json.loads(record[0])["time"] == "2026-12-19T00:00:00+00:00"
+        if mode_name == "entry-error":
+            with sqlite3.connect(tmp_path / "trades.sqlite") as conn:
+                assert conn.execute("SELECT count(*) FROM orders").fetchone()[0] == 1
+            mode[0] = "resume-entry"
+            with pytest.raises(RuntimeError):
+                service.start(ROOT / "user_data/configs/h1_dryrun.json", tmp_path, tmp_path / "ledger", placeholder=True)
+            with sqlite3.connect(tmp_path / "trades.sqlite") as conn:
+                assert conn.execute("SELECT count(*) FROM orders").fetchone()[0] == 1
+
+
+def test_stop_rejects_foreign_pid_without_signal(tmp_path, monkeypatch):
+    import fcntl
+    import os
+    import h1_service
+    calls = []
+    with (tmp_path / "service.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        h1_service.heartbeat(tmp_path, {"state": "ready"})
+        monkeypatch.setattr(os, "kill", lambda *args: calls.append(args))
+        with pytest.raises(ValueError, match="PID identity changed"):
+            h1_service.stop(tmp_path)
+    assert calls == []

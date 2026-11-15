@@ -29,6 +29,8 @@ See [the research harness contract and commands](docs/research-harness.md) for s
 
 **Accounting boundary:** fixed-capital marked equity, explicit fee/spread/slippage stress and split `net_return`, `net_sharpe` and `max_drawdown` now feed the ledger. Whole-path engine metrics remain labelled separately; synthetic terminal exits do not create fills or fees. The paper gate enforces all-instance equity limits and fails closed on missing/stale inputs. See `docs/cost-risk-accounting.md` for input contracts and limitations. Do not use legacy promotion gates as H1 G1 evidence.
 
+**H1 paper service:** the isolated start/stop/status commands, weekly forward ledger writer and offline readiness evidence are in [H1 paper readiness](docs/h1-paper-readiness.md). Launch still requires G0 approval, selection and the 19 December 2026 start date. Never start the legacy Compose stack for H1.
+
 ## Legacy architecture and factory (paused)
 
 The sections below describe retained factory components, not the active H1 workflow or verified profitability. Their historical short-window gates are not an untouched outer evaluation.

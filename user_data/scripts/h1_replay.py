@@ -135,13 +135,14 @@ def compare(actual, expected, pairs):
     details = []
     for reference in expected:
         row = observed.get(reference["time"], {})
-        blocked = row.get("status") in ("blocked", "missed", "expired") or row.get("risk_scale", 1.) < 1 - 1e-8
+        blocked = row.get("status") != "finished" or row.get("risk_scale", 1.) < 1 - 1e-8 or row.get("risk_reason") not in (None, "", "ok")
         for pair in pairs:
             want = reference["target_weights"].get(pair)
             got = row.get("target_weights", {}).get(pair)
             target_match = (isinstance(want, (int, float)) and isinstance(got, (int, float))
                             and math.isfinite(want) and math.isfinite(got) and abs(want - got) <= .005 + 1e-12)
             details.append(dict(time=reference["time"], pair=pair, expected=want, actual=got,
+                                status=row.get("status"), reason=row.get("risk_reason"),
                                 blocked=blocked, target_match=target_match, match=target_match and not blocked))
     matched = sum(row["match"] for row in details)
     percent = 100 * matched / len(details) if details else 0.
@@ -169,4 +170,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
