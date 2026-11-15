@@ -6,7 +6,7 @@ The 30-day window is **2–31 December 2021**. The measured result is **120/120 
 
 This replays archived development candles with flat offline books at daily opens. It does not measure historical spread, public-data execution slippage, forward returns or a G2 pass. The service lifecycle and weekly writer have separate synthetic offline subprocess coverage in the engine suite.
 
-Raw candles, journals, trades databases and local logs are not published here. The manifest's source commit precedes this evidence-only commit; final-head reruns are recorded in PR #56 and its Kanban handoff.
+Raw candles, journals, trades databases and local logs are not published here. The manifest's source commit precedes this evidence-only commit; final-head reruns are recorded in the recovery fix PR and its Kanban handoff. This refresh verifies the recovery changes after merged PR #56; all 120 day/pair comparison details are unchanged.
 
 Reproduce with an isolated environment installed from `docker/requirements-h1-engine.txt`:
 

@@ -9,7 +9,7 @@ PR #56 supplies the isolated paper execution path. Its recovery fix adds audited
 - Archived development replay: **120/120 daily pair targets matched**, both raw and risk-adjusted agreement **100%**, over **2–31 December 2021**. It produced **32 real Freqtrade dry-run order records**.
 - Subprocess tests run the real service loop, pinned engine, SQLite journals and OS signals with exchange I/O replaced by synthetic fixtures and sockets denied. They cover a first-tick ticker failure followed by readiness within five minutes, lock contention, stop/status, foreign-PID refusal, failed starts, partial entry and restart without duplicate orders, malformed/stale risk state, stopped-only reconciliation, and audited code reidentification.
 - Weekly CLI subprocess tests cover complete evidence, missing decisions/NAV, late decisions, durable error receipts, corrupt data, changed strategy identity, placeholders, cost-check failure and idempotency. A finished day plus a later ticker error remains **4/4** matches; latch/reset/code-change receipts retain **0/4 adjusted** matches without erasing raw targets. An interrupted review retains an error row and its denominator.
-- GitHub currently reports no checks for this branch. Local verification is not a claim of green CI.
+- Check GitHub separately at the final PR head. Local verification is not a claim of green CI.
 
 The archived comparison is correctness evidence, not forward performance or a G2 pass. `h1-paper-replay/comparison.json` contains derived weights only; raw candles and runtime databases stay private. The adjacent manifest records source hashes and input snapshot provenance.
 
@@ -60,7 +60,7 @@ The single `research_h1.designated_portfolio_notional` remains **250000, pending
 
 ### Latch and reconciliation
 
-Inspect top-level `risk.kill_switch_active` and `risk.reason` in `status`, not only the final `stopped` heartbeat. A failed fetch grants nothing and records an error without manufacturing an empty risk snapshot. The last risk timestamp is not refreshed by failed acquisition. A gap exceeding **600 seconds** therefore still latches on the next evaluation, as do stale/invalid evaluated inputs and wallet/SQL reconciliation mismatches. Healthy data alone never clears a latch.
+Inspect top-level `risk.kill_switch_active` and `risk.reason` in `status`, not only the final `stopped` heartbeat. A failed fetch grants nothing and records an error without manufacturing an empty risk snapshot. Failed ticker/book acquisition does not refresh the last risk timestamp. A gap exceeding **600 seconds** therefore still latches on the next evaluation, as do stale/invalid evaluated inputs and wallet/SQL reconciliation mismatches. Healthy data alone never clears a latch.
 
 After investigating the outage or discrepancy, stop the service and confirm `running=false`. Preserve a stopped-state backup before recovery. Use the same pinned checkout, configuration, ledger and directory:
 
@@ -112,7 +112,7 @@ Each row has `hypothesis=H1`, `split=forward`, and a cumulative window starting 
 
 - `ok` means a completed ordinary review, **not a G2 pass**. A cost or agreement check can fail in an `ok` row.
 - `missed` preserves missing evidence or unfinished/late daily decisions.
-- `error` preserves missing/unfinished decisions with dated errors, or scoring failure. A later tick error never rewrites a finished decision; all in-window errors remain in `notes.operational_errors`.
+- `error` preserves missing/unfinished decisions with dated errors, or scoring failure. A later tick error never rewrites a finished decision; all recorded in-window errors remain in `notes.operational_errors`.
 - `invalid` excludes placeholders and changed selected strategy identity.
 
 Exit 0 means `ok`; exit 1 means a written non-`ok` row; argument/preflight errors exit 2. The JSON output contains the actual ledger row. Inspect its JSON `notes` for checks and evidence coverage.
