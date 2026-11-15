@@ -1,0 +1,20 @@
+{
+  "hypothesis": "H1",
+  "warmup": ["20180111", "20190113"],
+  "splits": {
+    "dev": ["20190114", "20211231"],
+    "selection": ["20220101", "20240630"],
+    "eval": ["20240701", "20261218"]
+  },
+  "snapshots": {
+    "S1": {"manifest": "../data/research/S1/manifest.json", "hash": ""},
+    "S2": {"manifest": "../data/research/S2/manifest.json", "hash": ""}
+  },
+  "params": {
+    "ladder": [20, 60, 180],
+    "sigma_target": 0.45,
+    "vol_window": 60,
+    "rebalance_band": 0.025,
+    "cost_rate": 0.003
+  }
+}

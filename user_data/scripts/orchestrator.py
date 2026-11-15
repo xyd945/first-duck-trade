@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import subprocess
+from research import enabled
 
 # Notification helper (graceful if not configured)
 try:
@@ -743,6 +744,8 @@ def job_generate_strategies():
     and registers passing candidates in the registry.
     """
     log.info("=== Job: Generate strategies ===")
+    if not enabled("ENABLE_LLM_GENERATION"):
+        return
 
     if not (os.environ.get("DEEPSEEK_API_KEY")
             or os.environ.get("ANTHROPIC_API_KEY")):
@@ -1331,6 +1334,8 @@ def job_hyperopt_candidates():
       HYPEROPT_FAILED    hyperopt subprocess itself errored (timeout, OOM, etc.)
     """
     log.info("=== Job: Hyperopt rescue ===")
+    if not enabled("ENABLE_HYPEROPT_RESCUE"):
+        return
     try:
         sys.path.insert(0, str(BASE_DIR / "scripts"))
         from strategy_registry import get_hyperopt_candidates, mark_hyperopt_outcome
@@ -1403,6 +1408,8 @@ def job_reflector():
     regime labels, and suggests regime-to-strategy mapping changes.
     """
     log.info("=== Job: Reflector agent ===")
+    if not enabled("ENABLE_LLM_GENERATION"):
+        return
 
     try:
         # llm_client handles provider selection + API key check. We still
@@ -1516,6 +1523,8 @@ def job_llm_regime_override():
     to potentially override or adjust the regime classification.
     """
     log.info("=== Job: LLM regime override ===")
+    if not enabled("ENABLE_LLM_GENERATION"):
+        return
 
     if not (os.environ.get("DEEPSEEK_API_KEY")
             or os.environ.get("ANTHROPIC_API_KEY")):
@@ -1624,7 +1633,8 @@ def main():
     # Run at 00:05 UTC daily (after daily candle close)
     scheduler.add_job(job_fetch_macro_data, "cron", hour=0, minute=5, id="fetch_macro")
     scheduler.add_job(job_classify_regime, "cron", hour=0, minute=10, id="classify_regime")
-    scheduler.add_job(job_llm_regime_override, "cron", hour=0, minute=12, id="llm_regime")
+    if enabled("ENABLE_LLM_GENERATION"):
+        scheduler.add_job(job_llm_regime_override, "cron", hour=0, minute=12, id="llm_regime")
     scheduler.add_job(job_apply_regime, "cron", hour=0, minute=15, id="apply_regime")
 
     # --- Weekly jobs: Strategy Factory Loop ---
@@ -1636,13 +1646,16 @@ def main():
     # ~3 min/DeepSeek-call). Sunday 02:00 left only ~2 hours before daily
     # macro fetch and risked timeline collision. Saturday 20:00 → Sunday 09:00
     # gives a 13-hour runway.
-    scheduler.add_job(job_generate_strategies, "cron", day_of_week="sat", hour=20, minute=0, id="generate_strategies")
+    if enabled("ENABLE_LLM_GENERATION"):
+        scheduler.add_job(job_generate_strategies, "cron", day_of_week="sat", hour=20, minute=0, id="generate_strategies")
     # Backtest fires at Sun 00:30 — gives generation up to 4.5 hours
     scheduler.add_job(job_backtest_candidates, "cron", day_of_week="sun", hour=0, minute=30, id="backtest_candidates")
     # Reflector at Sun 09:00 — backtests should be done by then
-    scheduler.add_job(job_reflector, "cron", day_of_week="sun", hour=9, minute=0, id="reflector")
+    if enabled("ENABLE_LLM_GENERATION"):
+        scheduler.add_job(job_reflector, "cron", day_of_week="sun", hour=9, minute=0, id="reflector")
     # Hyperopt last — slowest stage, can run while we sleep
-    scheduler.add_job(job_hyperopt_candidates, "cron", day_of_week="sun", hour=12, minute=0, id="hyperopt_candidates")
+    if enabled("ENABLE_HYPEROPT_RESCUE"):
+        scheduler.add_job(job_hyperopt_candidates, "cron", day_of_week="sun", hour=12, minute=0, id="hyperopt_candidates")
 
     # --- Risk monitoring (every 5 minutes) ---
     scheduler.add_job(job_check_risk, "interval", minutes=5, id="check_risk")

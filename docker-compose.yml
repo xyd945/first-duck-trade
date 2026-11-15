@@ -154,6 +154,13 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
       - ORCHESTRATOR_MODE=${ORCHESTRATOR_MODE:-dry-run}
+      # Research pause: API keys alone must never restart search or feedback.
+      - ENABLE_LLM_GENERATION=${ENABLE_LLM_GENERATION:-false}
+      - ENABLE_STRATEGY_CRITIC=${ENABLE_STRATEGY_CRITIC:-false}
+      - ENABLE_HYPEROPT_RESCUE=${ENABLE_HYPEROPT_RESCUE:-false}
+      - RESEARCH_CONFIG=${RESEARCH_CONFIG:-}
+      - TRIAL_LEDGER_PATH=${TRIAL_LEDGER_PATH:-/app/user_data/data/trial_ledger.sqlite}
+      - RESEARCH_GIT_SHA=${RESEARCH_GIT_SHA:-}
       # Promotion policy: strict gates require real evidence from every gate.
       # Keep walk-forward enabled with strict gates, otherwise SKIP_WF blocks
       # promotion even when a candidate is profitable on the full backtest.

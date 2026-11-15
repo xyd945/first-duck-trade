@@ -430,6 +430,8 @@ def record_backtest(strategy_id: int, results: dict, attribution: dict | None = 
     correlation gate can locate this strategy's trade list later. Optional
     — strategies backtested before R2d won't have it.
     """
+    if results.get("split") == "eval":
+        raise ValueError("Sealed evaluation results cannot enter the feedback registry")
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
 

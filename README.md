@@ -1,72 +1,37 @@
 # First Duck Trade
 
-A self-improving algorithmic crypto trading system: an LLM (DeepSeek by default, Claude as fallback) automatically generates trading strategies, runs them through a multi-layer defensive filter, deploys the survivors to paper-trade on OKX, and feeds the results back into the next generation cycle. Built on [Freqtrade](https://github.com/freqtrade/freqtrade).
+A crypto strategy research harness built on [Freqtrade](https://github.com/freqtrade/freqtrade). The legacy LLM factory remains in the repository, but generation, critic calls and hyperopt rescue are **off by default**. H1 uses a hand-written daily spot strategy, not generated rules.
 
-The point is **not** to ask an LLM to write one strategy and run it. The point is to build a pipeline that produces, evaluates, and learns from many strategies on a weekly cadence, so that what gets deployed is what survived several rounds of evidence-based filtering — not what a single LLM call happened to produce.
+## Research-first quick start
 
-## Quick start
+Do not start the full Compose stack, the orchestrator or trading services for research setup. No exchange keys, demo orders or live orders are required. The pause flags do **not** disable every legacy trading job; they are not permission to run that stack.
 
-You need three things: Docker, an OKX account (demo trading is fine), and an LLM API key (DeepSeek by default, or Anthropic).
+1. Create an isolated Python 3.12 environment and install `docker/requirements-orchestrator.txt` there.
+2. Run the tests without starting a scheduler:
 
-```bash
-# 1. Clone
-git clone https://github.com/xyd945/first-duck-trade.git
-cd first-duck-trade
+   ```bash
+   .test-venv/bin/python -m pytest tests/ -q
+   ```
 
-# 2. Configure
-cp .env.example .env
-# Edit .env — fill in:
-#   DEEPSEEK_API_KEY        (https://platform.deepseek.com)
-#   ANTHROPIC_API_KEY       (optional; auto-fallback if DeepSeek errors)
-#   OKX_API_KEY / SECRET / PASSPHRASE   (from OKX demo trading)
-#   FT_MOMENTUM_API_PASSWORD            (any random string)
-#   FT_SWEEP_API_PASSWORD               (any random string)
-#   FT_MOMENTUM_JWT_SECRET / FT_SWEEP_JWT_SECRET   (any random 32+ chars)
-#   TELEGRAM_TOKEN / TELEGRAM_CHAT_ID   (optional; for alerts)
+3. Copy `user_data/configs/research-h1.example.json` to an ignored local policy file. Set `RESEARCH_CONFIG` to that file. Its dates are inclusive UTC days:
 
-# user_data/configs/config-{sweep,momentum}.json are RENDERED at container
-# startup from the committed *.json.template files; you don't write them by
-# hand. The render fails fast if any of the env vars above are missing.
+   | Window | Start | End |
+   |---|---|---|
+   | Warm-up | 2018-01-11 | 2019-01-13 |
+   | Development | 2019-01-14 | 2021-12-31 |
+   | Selection | 2022-01-01 | 2024-06-30 |
+   | Untouched evaluation | 2024-07-01 | 2026-12-18 |
 
-# 3. Download historical data (one-time, ~3-5 min)
-docker compose run --rm freqtrade-sweep download-data \
-  --config /freqtrade/user_data/configs/config-sweep.json \
-  --pairs BTC/USDT ETH/USDT SOL/USDT XRP/USDT \
-  --timeframe 1h 4h 1d \
-  --days 365
+4. Freeze confirmed OKX `1Dutc` bars for BTC, ETH, SOL and XRP against USDT. Pin the returned composite hash in the policy. Empty example hashes deliberately prevent runs.
+5. Use the explicit development/selection CLI; preregister every configuration and baseline/sensitivity variant before recording the selection row. S2 and evaluation remain unavailable until the evaluation cutoff has closed plus ten minutes.
 
-# 4. Bring everything up
-docker compose up -d
+See [the research harness contract and commands](docs/research-harness.md) for snapshot creation, the one-use evaluation lock, split artefacts, exact hash formats and the shared ledger.
 
-# 5. Verify (all should be "Up")
-docker compose ps
-docker compose logs --tail 30 orchestrator | grep "Jobs registered"
-```
+**Accounting boundary:** this change supplies continuous-path wallet/trade slices, not the net-return accounting scheduled for fix 4. `net_return`, `net_sharpe` and `max_drawdown` stay NULL until that accounting exists. Whole-path engine metrics are labelled separately. Do not use legacy promotion gates as H1 G1 evidence.
 
-After this, the orchestrator runs autonomously. Nothing for you to do until the first weekly cycle fires on Sunday 02:00 UTC.
+## Legacy architecture and factory (paused)
 
-### Running tests
-
-The orchestrator container mounts `./tests` read-only so the suite can run from inside without copying files in:
-
-```bash
-docker exec ft-orchestrator python -m pytest tests/ -q
-```
-
-The host doesn't need pytest installed; the container ships with it.
-
-### After pulling changes
-
-`ft-orchestrator` bind-mounts `docker-compose.yml` as a single file. Git
-replaces files on checkout/pull/merge, and single-file bind mounts can go
-stale (or show a torn, truncated view) when the underlying inode changes —
-the symptom is `docker compose` commands from inside the orchestrator
-failing with `invalid interpolation format` errors while the host file
-validates fine. After any git operation that touches `docker-compose.yml`:
-
-```bash
-docker compose up -d --force-recreate orchestrator
-```
+The sections below describe retained factory components, not the active H1 workflow or verified profitability. Their historical short-window gates are not an untouched outer evaluation.
 
 ## Architecture
 
@@ -88,7 +53,7 @@ docker compose up -d --force-recreate orchestrator
    ↳ funding rate                                                 │     │
    ↳ open interest                  │                             │     │
                                     ▼                             ▼     ▼
-  Spot     (Binance daily)    ┌─ backtest ── full 6-month        OKX spot trading
+  Spot     (Binance daily)    ┌─ backtest ── selection split     OKX spot trading
    ↳ ETH, BTC                 ├─ attribute ── per-trade macro     (demo by default)
    ↳ → ETH/BTC ratio          ├─ gate     ── regime/buyhold/      
                               │              walk-forward/        
@@ -146,15 +111,19 @@ Free-form Python from an LLM is brittle (forgotten imports, wrong column names, 
 
 ### 4. Hyperopt rescue
 
+Disabled unless `ENABLE_HYPEROPT_RESCUE=true`. The retained promotion bypass is not repaired here; do not enable it for H1. The runner now restricts search to development data and records each requested epoch batch, including failures.
+
 Marginal failures (`FAIL_TOO_FEW` or `FAIL_UNPROFITABLE` with > 0 trades) go through Freqtrade's hyperopt on Sunday 04:00 UTC. The LLM declares parameter ranges via `IntParameter`/`DecimalParameter`; hyperopt searches them. Rescued strategies (post-hyperopt re-backtest meets promote criteria) flip from retired → active.
 
 ### 5. Critic pass
+
+Disabled unless `ENABLE_STRATEGY_CRITIC=true`; the direct entry point returns `SKIP` without calling an LLM.
 
 After generation, a second LLM call reviews the rendered code for over-constrained logic (6+ AND conditions), missing NaN guards, threshold sanity errors, regime/logic mismatch, and uncaught look-ahead. Returns PASS / WARN / REJECT. REJECT triggers a regeneration with the critic's feedback in the retry prompt. WARN proceeds. Errors are non-blocking (synthetic PASS) — the critic adds signal, it doesn't gate.
 
 ### 6. Iterative refinement
 
-After generation + critic, a 90-day mini-backtest runs. If it fails acceptance (< 5 trades OR profit ≤ 0 AND sharpe ≤ 0), the diagnostic ("ZERO TRADES — loosen filters or lower macro_min_confidence" / "UNPROFITABLE — reconsider thesis") is fed back into a second generation turn. Up to 2 turns total. Best-scoring attempt is kept if neither passes. Live trial showed a strategy rescued from 0 trades to 25 trades, Sharpe 1.72.
+Historically, this loop used a moving 90-day mini-backtest. It now uses only the configured development window. Generation requires `ENABLE_LLM_GENERATION=true`; evaluation is never a generation input. Engine aggregates are not substituted for the pending split-level net metrics, so the old acceptance path must not be used as an H1 gate.
 
 ### 7. Pipeline gates (defensive layer)
 
@@ -193,6 +162,8 @@ See `docs/freqai-candidates.md`.
 This is what closes the loop. Earlier iterations had reflection text but the generator never saw the underlying evidence — now both layers see the same data, at different granularities.
 
 ## What runs when
+
+Nothing in this table should be started for the research setup. Generation, reflector and LLM-regime jobs are not registered without `ENABLE_LLM_GENERATION=true`; hyperopt is not registered without `ENABLE_HYPEROPT_RESCUE=true`. Direct job calls also respect those flags. Remaining legacy jobs are not disabled by this pause.
 
 | Job | Schedule | What it does |
 |---|---|---|
@@ -273,7 +244,7 @@ To generate more strategies per week, bump `count` and add regimes. To skip the 
 - `gate_walk_forward(min_passing_windows=2, max_sharpe_std=1.5)` — change OOS robustness requirements.
 - `gate_correlation(threshold=0.7, min_overlap_days=30)` — how correlated is "too correlated".
 
-Walk-forward is opt-in (expensive — N× backtest). Enable per run with `R7_WALK_FORWARD=1` in the environment.
+The retained walk-forward gate is a selection-data stability check, not untouched evaluation. Requests outside the configured split are rejected and logged. Compose's strict legacy gates are not H1 G1, and the new evaluation API never promotes or writes results into the feedback registry.
 
 ### Per-instance Freqtrade configs
 
@@ -346,20 +317,20 @@ first-duck-trade/
 │   │   └── notifier.py             # Telegram alerts
 │   ├── data/                       # OHLCV, regime state, registry DB (gitignored)
 │   └── backtest_results/           # per-call trade exports (gitignored)
-└── tests/                          # 251 tests, pytest
+└── tests/                          # pytest, including research-integrity fixtures
 ```
 
 ## Testing
 
 ```bash
-# Run the full suite (mocked LLM calls — doesn't need API keys)
-docker exec ft-orchestrator python -m pytest /app/tests -q
+# Run the full suite in the isolated environment; no scheduler or keys
+.test-venv/bin/python -m pytest tests/ -q
 
 # Specific area
-docker exec ft-orchestrator python -m pytest /app/tests/test_pipeline_gates.py -v
+.test-venv/bin/python -m pytest tests/test_research.py tests/test_research_snapshots.py tests/test_research_pause.py -v
 ```
 
-251 tests cover: validation pipeline, regime detection, indicator math, LLM client (both providers + fallback), strategy spec + critic + iterative generator, pipeline gates (all four), trade attribution (math + reflector/generator consumption), registry lifecycle, hyperopt rescue.
+The suite covers the retained factory plus pause flags, canonical snapshots, continuous-path slicing, selection/evaluation locks, trial accounting and CLI routing. Research tests use explicitly synthetic prices and mock only the engine process boundary; they are not a market backtest or engine-integration certification. Exact counts are recorded on the PR.
 
 ## Tech stack
 
@@ -377,11 +348,10 @@ docker exec ft-orchestrator python -m pytest /app/tests/test_pipeline_gates.py -
 
 ## Status
 
-- **Phase 4: Paper trading** on OKX demo (BTC/USDT spot, can be expanded)
-- All 7 rounds of the factory loop are live (R1 failure memory through R7 gates)
-- Reflector and generator both consume attribution data
-- DeepSeek V4 Pro is the default LLM with automatic Anthropic fallback
-- Cron runs weekly on Sunday — first full DeepSeek-powered cycle fires automatically
+- Research-only setup: generation, critic and rescue are paused by default.
+- Frozen S1/S2 inputs and split policies replace unrestricted historical backtests.
+- H1 strategy, net cost/risk accounting and G1 scoring are separate work; no edge is claimed.
+- No schedulers, trading services, credentials or orders are required to run the tests.
 
 ## What's intentionally NOT done yet
 
