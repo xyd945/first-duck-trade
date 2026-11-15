@@ -5,26 +5,6 @@ import pandas as pd
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def isolated_trial_ledger(tmp_path, monkeypatch):
-    monkeypatch.setenv("TRIAL_LEDGER_PATH", str(tmp_path / "trial_ledger.sqlite"))
-
-
-@pytest.fixture(autouse=True)
-def legacy_opt_in(request, monkeypatch):
-    """These suites exercise the retained, explicitly enabled factory paths."""
-    if request.path.name == "test_freqai_generator.py":
-        monkeypatch.setenv("ENABLE_LLM_GENERATION", "true")
-    if request.path.name == "test_strategy_critic.py":
-        monkeypatch.setenv("ENABLE_STRATEGY_CRITIC", "true")
-    if request.path.name == "test_hyperopt.py":
-        monkeypatch.setenv("ENABLE_HYPEROPT_RESCUE", "true")
-    if request.path.name in {"test_deployment_manager.py", "test_phase3_reconciler_acting.py"}:
-        # Retained Docker behaviour is tested only against mocks; production remains locked.
-        import paper_risk
-        monkeypatch.setattr(paper_risk, "EXECUTION_ENABLED", True)
-
-
 @pytest.fixture
 def sample_ohlcv():
     """Generate a simple OHLCV dataframe for testing indicators."""

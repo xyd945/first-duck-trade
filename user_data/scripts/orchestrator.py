@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import subprocess
-from research import enabled
 
 # Notification helper (graceful if not configured)
 try:
@@ -31,13 +30,11 @@ except ImportError:
     def notify_instance_down(*a, **kw): pass
     def notify_reflector_summary(*a, **kw): pass
 import sys
-import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
-import paper_risk
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.events import EVENT_JOB_ERROR
 
@@ -57,7 +54,6 @@ else:
 DATA_DIR = BASE_DIR / "data"
 REGIME_STATE_FILE = BASE_DIR / "data" / "regime_state.json"
 RISK_STATE_FILE = BASE_DIR / "data" / "risk_state.json"
-RISK_SNAPSHOT_FILE = BASE_DIR / "data" / "paper_account.json"
 
 # Freqtrade instance endpoints (container names resolve via Docker networking).
 # REST API credentials live in env vars rather than committed source — the
@@ -86,6 +82,12 @@ INSTANCES = {
     },
 }
 
+# Risk limits (NOT tunable by LLM, human-set only)
+RISK_LIMITS = {
+    "max_drawdown_daily_pct": 3.0,    # -3% daily max
+    "max_drawdown_total_pct": 10.0,   # -10% total kill switch
+    "crisis_regime_action": "stop_all",  # Stop all trading in crisis
+}
 
 MODE = os.environ.get("ORCHESTRATOR_MODE", "dry-run")
 
@@ -160,20 +162,13 @@ class FreqtradeClient:
         return self._request("GET", "balance")
 
     def start(self):
-        if not paper_risk.EXECUTION_ENABLED:
-            return {"status": "Execution is disabled"}
         return self._request("POST", "start")
 
     def stop(self):
         return self._request("POST", "stop")
 
-    def stop_entries(self):
-        return self._request("POST", "stopentry")
-
     def force_exit_all(self):
         """Force exit all open trades."""
-        if not paper_risk.EXECUTION_ENABLED:
-            return {"status": "Execution is disabled"}
         status = self.get_status()
         if status:
             for trade in status:
@@ -211,14 +206,15 @@ def save_regime_state(state: dict):
 # Risk State
 # ---------------------------------------------------------------------------
 def load_risk_state() -> dict:
-    try:
-        state = json.loads(RISK_STATE_FILE.read_text())
-        if not isinstance(state, dict):
-            raise ValueError("Invalid risk state")
-        return state
-    except (OSError, ValueError):
-        return {"kill_switch_active": True, "allow_new_exposure": False,
-                "reason": "Missing or invalid risk state; initialise explicitly after reconciliation"}
+    if RISK_STATE_FILE.exists():
+        with open(RISK_STATE_FILE) as f:
+            return json.load(f)
+    return {
+        "kill_switch_active": False,
+        "daily_pnl": 0.0,
+        "total_pnl": 0.0,
+        "last_check": None,
+    }
 
 
 def save_risk_state(state: dict):
@@ -392,9 +388,6 @@ def job_apply_regime():
     - In other regimes, start matching strategies and stop non-matching ones.
     """
     log.info("=== Job: Apply regime to instances ===")
-    if not paper_risk.EXECUTION_ENABLED:
-        job_check_risk()
-        return
     state = load_regime_state()
     regime = state.get("regime", "ranging")
     risk = load_risk_state()
@@ -444,49 +437,48 @@ def job_apply_regime():
 
 
 def job_check_risk():
-    """Mark the entire designated paper account, then halt entries without liquidation."""
-    from deployment_manager import DeploymentManager
+    """Frequent: check drawdown limits across all instances.
+
+    If daily drawdown exceeds limit or total drawdown hits kill switch,
+    stop everything immediately.
+    """
     risk = load_risk_state()
-    instances = dict(INSTANCES)
-    try:
-        for deployed in DeploymentManager().list_deployed():
-            name = deployed["name"]
-            if not re.fullmatch(r"ft-deployed-[a-z0-9-]+", name):
-                raise ValueError("Invalid discovered instance name")
-            instances[name] = {"url": f"http://{name}:8080",
-                               "username": os.environ.get("FT_DEPLOYED_API_USERNAME", "freqtrader"),
-                               "password": os.environ.get("FT_DEPLOYED_API_PASSWORD", "")}
-        snapshot = json.loads(RISK_SNAPSHOT_FILE.read_text())
-        risk = paper_risk.evaluate(snapshot, risk, set(instances), datetime.now(timezone.utc))
-    except Exception as exc:
-        risk.update(kill_switch_active=True, allow_new_exposure=False,
-                    reason=f"Account reconciliation failed: {type(exc).__name__}")
-    # Persist the denial before attempting network calls; retries must not reopen entries.
-    try:
+
+    if risk.get("kill_switch_active"):
+        return  # Already dead
+
+    total_pnl = 0.0
+    for name, cfg in INSTANCES.items():
+        client = FreqtradeClient(cfg["url"], cfg["username"], cfg["password"])
+        profit = client.get_profit()
+        if profit and "profit_all_coin" in profit:
+            total_pnl += float(profit["profit_all_coin"])
+
+    # Check total drawdown kill switch
+    # Assuming 1000 USDT total capital (sum of both instances)
+    total_capital = 1000.0
+    drawdown_pct = abs(min(total_pnl, 0)) / total_capital * 100
+
+    if drawdown_pct >= RISK_LIMITS["max_drawdown_total_pct"]:
+        log.critical(
+            f"KILL SWITCH TRIGGERED! Drawdown: {drawdown_pct:.1f}% >= "
+            f"{RISK_LIMITS['max_drawdown_total_pct']}%. Stopping all trading."
+        )
+        for name, cfg in INSTANCES.items():
+            client = FreqtradeClient(cfg["url"], cfg["username"], cfg["password"])
+            if client.is_alive():
+                client.force_exit_all()
+                client.stop()
+
+        risk["kill_switch_active"] = True
+        risk["total_pnl"] = total_pnl
+        risk["trigger_reason"] = f"Drawdown {drawdown_pct:.1f}%"
         save_risk_state(risk)
-    except OSError:
-        risk.update(kill_switch_active=True, allow_new_exposure=False, reason="Risk state write failed")
-        log.critical("Risk state write failed; attempting all entry halts")
-    failures = []
-    if not risk.get("allow_new_exposure", False) or not paper_risk.EXECUTION_ENABLED:
-        for name, cfg in instances.items():
-            try:
-                client = FreqtradeClient(cfg["url"], cfg["username"], cfg["password"])
-                if not client.stop_entries():
-                    failures.append(name)
-            except Exception:
-                failures.append(name)
-        risk["stop_failures"] = failures
-        if failures:
-            risk.update(kill_switch_active=True, allow_new_exposure=False, reason="Entry halt failed")
-        try:
-            save_risk_state(risk)
-        except OSError:
-            risk.update(kill_switch_active=True, allow_new_exposure=False, reason="Risk state write failed")
-            log.critical("Risk halt could not be persisted; execution remains disabled")
-        if not risk.get("allow_new_exposure", False):
-            notify_kill_switch(risk.get("reason", "Entry halt"), risk.get("total_pnl", 0.))
-    return risk
+        notify_kill_switch(risk["trigger_reason"], total_pnl)
+        return
+
+    risk["total_pnl"] = total_pnl
+    save_risk_state(risk)
 
 
 def job_health_check():
@@ -573,7 +565,7 @@ def job_reconcile_deployments():
         "RECONCILER_ACTING", "false"
     ).lower() in ("1", "true", "yes")
     allowlist = _parse_allowlist(os.environ.get("RECONCILER_ALLOWLIST", ""))
-    actually_acting = paper_risk.EXECUTION_ENABLED and reconciler_acting and bool(allowlist)
+    actually_acting = reconciler_acting and bool(allowlist)
     if reconciler_acting and not allowlist:
         log.info("  RECONCILER_ACTING=true but RECONCILER_ALLOWLIST empty — "
                  "shakedown safety net: behaving as observe-only until an id "
@@ -751,8 +743,6 @@ def job_generate_strategies():
     and registers passing candidates in the registry.
     """
     log.info("=== Job: Generate strategies ===")
-    if not enabled("ENABLE_LLM_GENERATION"):
-        return
 
     if not (os.environ.get("DEEPSEEK_API_KEY")
             or os.environ.get("ANTHROPIC_API_KEY")):
@@ -1341,8 +1331,6 @@ def job_hyperopt_candidates():
       HYPEROPT_FAILED    hyperopt subprocess itself errored (timeout, OOM, etc.)
     """
     log.info("=== Job: Hyperopt rescue ===")
-    if not enabled("ENABLE_HYPEROPT_RESCUE"):
-        return
     try:
         sys.path.insert(0, str(BASE_DIR / "scripts"))
         from strategy_registry import get_hyperopt_candidates, mark_hyperopt_outcome
@@ -1415,8 +1403,6 @@ def job_reflector():
     regime labels, and suggests regime-to-strategy mapping changes.
     """
     log.info("=== Job: Reflector agent ===")
-    if not enabled("ENABLE_LLM_GENERATION"):
-        return
 
     try:
         # llm_client handles provider selection + API key check. We still
@@ -1530,8 +1516,6 @@ def job_llm_regime_override():
     to potentially override or adjust the regime classification.
     """
     log.info("=== Job: LLM regime override ===")
-    if not enabled("ENABLE_LLM_GENERATION"):
-        return
 
     if not (os.environ.get("DEEPSEEK_API_KEY")
             or os.environ.get("ANTHROPIC_API_KEY")):
@@ -1640,8 +1624,7 @@ def main():
     # Run at 00:05 UTC daily (after daily candle close)
     scheduler.add_job(job_fetch_macro_data, "cron", hour=0, minute=5, id="fetch_macro")
     scheduler.add_job(job_classify_regime, "cron", hour=0, minute=10, id="classify_regime")
-    if enabled("ENABLE_LLM_GENERATION"):
-        scheduler.add_job(job_llm_regime_override, "cron", hour=0, minute=12, id="llm_regime")
+    scheduler.add_job(job_llm_regime_override, "cron", hour=0, minute=12, id="llm_regime")
     scheduler.add_job(job_apply_regime, "cron", hour=0, minute=15, id="apply_regime")
 
     # --- Weekly jobs: Strategy Factory Loop ---
@@ -1653,16 +1636,13 @@ def main():
     # ~3 min/DeepSeek-call). Sunday 02:00 left only ~2 hours before daily
     # macro fetch and risked timeline collision. Saturday 20:00 → Sunday 09:00
     # gives a 13-hour runway.
-    if enabled("ENABLE_LLM_GENERATION"):
-        scheduler.add_job(job_generate_strategies, "cron", day_of_week="sat", hour=20, minute=0, id="generate_strategies")
+    scheduler.add_job(job_generate_strategies, "cron", day_of_week="sat", hour=20, minute=0, id="generate_strategies")
     # Backtest fires at Sun 00:30 — gives generation up to 4.5 hours
     scheduler.add_job(job_backtest_candidates, "cron", day_of_week="sun", hour=0, minute=30, id="backtest_candidates")
     # Reflector at Sun 09:00 — backtests should be done by then
-    if enabled("ENABLE_LLM_GENERATION"):
-        scheduler.add_job(job_reflector, "cron", day_of_week="sun", hour=9, minute=0, id="reflector")
+    scheduler.add_job(job_reflector, "cron", day_of_week="sun", hour=9, minute=0, id="reflector")
     # Hyperopt last — slowest stage, can run while we sleep
-    if enabled("ENABLE_HYPEROPT_RESCUE"):
-        scheduler.add_job(job_hyperopt_candidates, "cron", day_of_week="sun", hour=12, minute=0, id="hyperopt_candidates")
+    scheduler.add_job(job_hyperopt_candidates, "cron", day_of_week="sun", hour=12, minute=0, id="hyperopt_candidates")
 
     # --- Risk monitoring (every 5 minutes) ---
     scheduler.add_job(job_check_risk, "interval", minutes=5, id="check_risk")

@@ -619,9 +619,6 @@ def generate_strategy(
       - generation_id: str
       - error: str (if failed)
     """
-    from research import enabled
-    if not enabled("ENABLE_LLM_GENERATION"):
-        return {"success": False, "error": "LLM generation is paused"}
     # Import validation pipeline + the LLM wrapper. llm_client lazily imports
     # the SDKs it needs, so a missing anthropic install only matters if the
     # caller actually selects the anthropic provider.

@@ -28,13 +28,85 @@ sys.path.insert(0, str(ROOT / "user_data" / "scripts"))
 # run_mini_backtest — out-of-sample window
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name,split", [("run_mini_backtest", "dev"), ("run_full_backtest", "selection")])
-@pytest.mark.parametrize("kwargs", [{}, {"timeframe": "4h", "timerange": "20200102-20200103"}])
-def test_wrappers_use_configured_splits_not_rolling_dates(name, split, kwargs):
-    import backtest_runner
-    with patch("backtest_runner.run_backtest", return_value={"success": True}) as run:
-        getattr(backtest_runner, name)("S", **kwargs)
-    run.assert_called_once_with("S", split=split, **kwargs)
+def _parse_timerange(tr: str) -> tuple[datetime, datetime]:
+    """Parse a Freqtrade timerange string '20260101-20260401' into UTC dates."""
+    start_s, end_s = tr.split("-")
+    return (
+        datetime.strptime(start_s, "%Y%m%d").replace(tzinfo=timezone.utc),
+        datetime.strptime(end_s, "%Y%m%d").replace(tzinfo=timezone.utc),
+    )
+
+
+def test_mini_backtest_skips_recent_30_days_by_default():
+    """The mini window must END 30 days before now, not today. This is
+    what makes it out-of-sample relative to the full backtest."""
+    from backtest_runner import run_mini_backtest
+
+    captured = {}
+    def fake_run_backtest(strategy_name, timerange=None, **kw):
+        captured["timerange"] = timerange
+        return {"success": True, "total_trades": 0}
+
+    with patch("backtest_runner.run_backtest", side_effect=fake_run_backtest):
+        run_mini_backtest("S")
+
+    now = datetime.now(timezone.utc)
+    _, end = _parse_timerange(captured["timerange"])
+    gap_days = (now.date() - end.date()).days
+    # End should be ~30 days before today (allow ±1 day for clock-edge)
+    assert 29 <= gap_days <= 31, f"mini ends {gap_days}d before today; expected ~30"
+
+
+def test_mini_backtest_window_length_is_90_days_by_default():
+    """The mini window is 90 days long even after the skip, so freqtrade
+    has enough room before/after the 200-candle startup prelude."""
+    from backtest_runner import run_mini_backtest
+
+    captured = {}
+    def fake(strategy_name, timerange=None, **kw):
+        captured["timerange"] = timerange
+        return {"success": True, "total_trades": 0}
+
+    with patch("backtest_runner.run_backtest", side_effect=fake):
+        run_mini_backtest("S")
+
+    start, end = _parse_timerange(captured["timerange"])
+    length_days = (end - start).days
+    assert length_days == 90
+
+
+def test_mini_backtest_skip_recent_days_overridable():
+    """An operator should be able to switch back to today-anchored
+    evaluation by passing skip_recent_days=0."""
+    from backtest_runner import run_mini_backtest
+
+    captured = {}
+    def fake(strategy_name, timerange=None, **kw):
+        captured["timerange"] = timerange
+        return {"success": True, "total_trades": 0}
+
+    with patch("backtest_runner.run_backtest", side_effect=fake):
+        run_mini_backtest("S", skip_recent_days=0)
+
+    now = datetime.now(timezone.utc)
+    _, end = _parse_timerange(captured["timerange"])
+    assert (now.date() - end.date()).days <= 1
+
+
+def test_mini_backtest_window_length_overridable():
+    """Length is configurable for ops experimentation."""
+    from backtest_runner import run_mini_backtest
+
+    captured = {}
+    def fake(strategy_name, timerange=None, **kw):
+        captured["timerange"] = timerange
+        return {"success": True, "total_trades": 0}
+
+    with patch("backtest_runner.run_backtest", side_effect=fake):
+        run_mini_backtest("S", days=60, skip_recent_days=15)
+
+    start, end = _parse_timerange(captured["timerange"])
+    assert (end - start).days == 60
 
 
 # ---------------------------------------------------------------------------

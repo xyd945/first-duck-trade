@@ -78,7 +78,7 @@ def test_parse_handles_missing_json_block():
 # ---------------------------------------------------------------------------
 
 def test_run_hyperopt_success_path():
-    from backtest_runner import _run_hyperopt as run_hyperopt
+    from backtest_runner import run_hyperopt
 
     mock_proc = MagicMock()
     mock_proc.returncode = 0
@@ -88,7 +88,6 @@ def test_run_hyperopt_success_path():
     with patch("backtest_runner.subprocess.run", return_value=mock_proc) as mock_run:
         result = run_hyperopt(
             "FooStrategy", timerange="20251101-20260501", epochs=50,
-            run_dir=ROOT / "user_data/research_runs/command-fixture",
         )
 
     assert result["success"] is True
@@ -113,7 +112,7 @@ def test_run_hyperopt_success_path():
 
 
 def test_run_hyperopt_returns_failure_on_nonzero_exit():
-    from backtest_runner import _run_hyperopt as run_hyperopt
+    from backtest_runner import run_hyperopt
 
     mock_proc = MagicMock()
     mock_proc.returncode = 2
@@ -121,8 +120,7 @@ def test_run_hyperopt_returns_failure_on_nonzero_exit():
     mock_proc.stderr = "freqtrade: error: strategy not found"
 
     with patch("backtest_runner.subprocess.run", return_value=mock_proc):
-        result = run_hyperopt("MissingStrategy", timerange="20251101-20260501",
-                             run_dir=ROOT / "user_data/research_runs/command-fixture")
+        result = run_hyperopt("MissingStrategy", timerange="20251101-20260501")
 
     assert result["success"] is False
     assert "exited with code 2" in result["error"]
@@ -131,21 +129,20 @@ def test_run_hyperopt_returns_failure_on_nonzero_exit():
 
 def test_run_hyperopt_returns_failure_on_timeout():
     import subprocess as sp
-    from backtest_runner import _run_hyperopt as run_hyperopt
+    from backtest_runner import run_hyperopt
 
     def raise_timeout(*a, **kw):
         raise sp.TimeoutExpired(cmd="docker", timeout=60)
 
     with patch("backtest_runner.subprocess.run", side_effect=raise_timeout):
-        result = run_hyperopt("FooStrategy", timeout_seconds=60,
-                             run_dir=ROOT / "user_data/research_runs/command-fixture")
+        result = run_hyperopt("FooStrategy", timeout_seconds=60)
 
     assert result["success"] is False
     assert "timed out" in result["error"]
 
 
 def test_run_hyperopt_custom_spaces_and_loss():
-    from backtest_runner import _run_hyperopt as run_hyperopt
+    from backtest_runner import run_hyperopt
 
     mock_proc = MagicMock(returncode=0, stdout=SAMPLE_STDOUT, stderr="")
 
@@ -154,7 +151,6 @@ def test_run_hyperopt_custom_spaces_and_loss():
             "FooStrategy",
             spaces=("buy", "sell", "roi", "stoploss"),
             loss="CustomLoss",
-            run_dir=ROOT / "user_data/research_runs/command-fixture",
         )
 
     cmd = mock_run.call_args.args[0]

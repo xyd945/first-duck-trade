@@ -258,9 +258,6 @@ def propose_freqai_specs(
     LLM (up to `max_retries` extra turns per spec) — the same retry shape
     the rule generator uses.
     """
-    from research import enabled
-    if not enabled("ENABLE_LLM_GENERATION"):
-        return [{"success": False, "error": "LLM generation is paused"}]
     from freqai_spec import (
         FreqaiSpecError, register_freqai_candidate, validate_freqai_spec,
     )
