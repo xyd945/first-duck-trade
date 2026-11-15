@@ -87,6 +87,7 @@ def test_real_engine_sells_first_independently_of_pair_order():
     assert batches == reverse_batches
     monday = next(b for b in batches if b["time"].startswith("2019-01-21"))
     assert monday["execution_order"][:2] == ["ETH/USDT", "BTC/USDT"]
+    assert monday["target_weights"]["BTC/USDT"] == .5
     assert monday["cash"] >= -1e-7
     # The sale funds only (1-fee)/(1+fee) of the buy; costs leave an explicit gap.
     assert abs(monday["unfilled"]["ETH/USDT"]) < 1e-7

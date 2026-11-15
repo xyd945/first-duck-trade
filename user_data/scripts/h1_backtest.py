@@ -104,6 +104,8 @@ class H1Backtesting(Backtesting):
         after = self._settled()
         record = deepcopy(self.strategy.batch)
         record.update(time=current_time.isoformat(), execution_order=order,
+                      target_weights={p: float(row["target_weight"]) if pd.notna(row["target_weight"]) else None
+                                      for p, row in rows.items()},
                       cash=self.cash, holdings=after,
                       unfilled={p: target - after.get(p, 0.) for p, target in batch["targets"].items()})
         self.batches.append(record)
