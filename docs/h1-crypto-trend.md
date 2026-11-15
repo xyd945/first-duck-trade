@@ -31,14 +31,20 @@ PYTHONPATH=user_data/scripts .engine-venv/bin/python -m pytest tests/test_h1.py 
 
 The engine tests use offline OKX market metadata and synthetic prices; they make no network calls and need no keys.
 
-## Development run (downstream task)
+## Development runs and inactive paper config
+
+The completed development evidence is in [h1-development/README.md](h1-development/README.md): 24 market ledger rows, gate/base results, data hashes and reconciliation receipts. No selection or evaluation window ran.
+
+The keyless config is `user_data/configs/h1_dryrun.json`. It passes `show-config` and the strict dry-run schema but remains **not start-ready**: M45 is a placeholder and paper activation is deliberately refused. G0 approval, the actual selection, a paper execution adapter and reconciled risk inputs are still required. No service was added or started. Bybit is not runnable on the registered pairs; see [the venue report](h1-venue-check.md).
+
+### Individual development run
 
 ```sh
 PYTHONPATH=user_data/scripts .engine-venv/bin/python user_data/scripts/h1_backtest.py \
   --policy <policy.json> --engine-config <engine-config.json> --strategy H1Trend --config-id M45
 ```
 
-Baselines take `--strategy H1SimpleTrend|H1EqualWeight|H1BuyHold` and no `--config-id`. Data comes from exchange `okx`, keyless, USDT pairs, frozen through the fix-2 snapshot. Each attempt, including crashes, writes one `trial_ledger` row with `split = dev`; dev rows are not counted in N. Batch records, including target-versus-filled divergence, are written to `decision-batches.json` in the run directory.
+Baselines take `--strategy H1SimpleTrend|H1EqualWeight|H1BuyHold` and no `--config-id`. Cost-only reruns use `--sensitivity`, with matching policy and engine costs, and record a sensitivity verdict without a new configuration hash. Each finished row records engine/ccxt versions in `notes.params`, including failures. Data comes from exchange `okx`, keyless, USDT pairs, frozen through the fix-2 snapshot. Each attempt, including crashes, writes one `trial_ledger` row with `split = dev`; dev rows are not counted in N. Batch records, including target-versus-filled divergence, are written to `decision-batches.json` in the run directory.
 
 ## Interpretations of G0 (for the PR description)
 
