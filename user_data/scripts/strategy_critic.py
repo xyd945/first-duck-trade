@@ -111,6 +111,9 @@ def critic_review(
     failures as non-blocking. We never want the critic itself to halt the
     pipeline; its job is to add signal, not gate.
     """
+    from research import enabled
+    if not enabled("ENABLE_STRATEGY_CRITIC"):
+        return {"verdict": "SKIP", "summary": "Critic is paused", "issues": []}
     # Lazy import — keeps llm_client out of test paths that fully mock the
     # critic. Importing here also ensures we pick up monkeypatched modules.
     import sys

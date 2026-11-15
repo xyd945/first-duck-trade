@@ -1,5 +1,20 @@
 # TODOs
 
+## Research integrity reset — fix 2
+
+- [x] Disable LLM generation, critic calls and hyperopt rescue by default, including scheduled and direct entry points.
+- [x] Canonical SHA-256 OHLCV snapshots for the four daily OKX pairs; verify S2's S1 prefix byte for byte.
+- [x] Configure the G0 warm-up, development, selection and untouched evaluation windows; execute from the development start and slice the continuous path.
+- [x] Preregister execution variants before the single selection row; consume each evaluation once before reading S2, including failed runs.
+- [x] Keep evaluation out of the feedback registry and prevent a hypothesis returning to search after evaluation opens.
+- [x] Write all backtest/hyperopt-batch/evaluation attempts to the shared ledger; report G0 distinct-hash N separately from rows and epochs.
+- [x] Document CLI commands and fail-closed migration from moving/unrestricted timeranges in `docs/research-harness.md`.
+- [ ] Fix 4: compute cost-adjusted, capital-weighted marked equity and fill the ledger's net fields. Engine aggregates are not net split metrics.
+- [ ] H1: hand-written strategy, baselines, startup/eligibility checks and real engine integration. No historical or evaluation performance is claimed by fix 2.
+- [ ] Fixes 1, 3 and 5 remain outstanding; do not restart the legacy factory or trading services.
+
+Historical completion notes below are retained as history, not current deployment status or proof of G1.
+
 ## Phase 1 — DONE
 - [x] Fix look-ahead bias in LiquiditySweepStrategy.py
 - [x] Fix look-ahead bias in fear_and_greed.py
